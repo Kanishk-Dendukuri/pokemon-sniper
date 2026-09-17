@@ -3,28 +3,42 @@
  * bidding at.
  *
  * One pipeline, end to end: find the Pokémon lots worth bidding on in the
- * auction about to close, and bid on them until a budget is committed. The
- * house is a Venue (scripts/fanatics-sniper.ts, scripts/alt-sniper.ts): it
- * scans its own catalogue into ScannedLots and, for a run that signs in, opens
- * an Exchange the book bids through (scripts/sniper-book.ts). Everything in
- * between — the chase list, the tier table, the sales-history rule, Card
- * Uploader pricing and identification, the caps, the CSV — is here and is the
- * same at both.
+ * auction about to close, price every one of them, and put the bids on all
+ * at once at the last sensible moment. The house is a Venue
+ * (scripts/fanatics-sniper.ts, scripts/alt-sniper.ts): it scans its own
+ * catalogue into ScannedLots and, for a run that signs in, opens an Exchange
+ * the book bids through (scripts/sniper-book.ts). Everything in between — the
+ * chase list, the tier table, the sales-history rule, Card Uploader pricing
+ * and identification, the caps, the CSV, the hold and the fire — is here and
+ * is the same at both.
  *
  * The lots are walked in card-priority order — PSA 10 down to 7, then CGC —
- * and priced a batch at a time; as soon as a batch turns up lots worth bidding
- * on, the bids go on, and the pricing carries on behind them until every lot
- * on the chase list has a max bid worked out. The run is a sniper with a low
- * strike rate: nearly every bid it holds will be outbid as the close nears,
- * and each one that is frees its share of the budget for the next lot down —
- * so the whole list has to be priced and ready, not just what the budget
- * reaches at the start. Started four or five hours before the close, the aim
- * is to have the last lot priced with an hour to spare.
+ * and priced a batch at a time until every lot on the list has a max bid
+ * worked out. Nothing is bid while that happens. A bid placed hours early is
+ * a bid the other bidder has hours to answer: on 2026-09-13 at Fanatics, 433
+ * bids went on from 4 PM, 189 of them were beaten by someone coming back
+ * later in the afternoon, and 28 were won. So the run holds. From half an
+ * hour before the fire it re-scans the house every few minutes and notes
+ * which lots the room has already taken past our max; at the fire it quotes
+ * whatever is left and bids on all of it, eight lots at a time, in about the
+ * time one bid used to take. Only then does it watch: it polls the bids it
+ * holds until the auction closes, the job is stopped from outside (GitHub
+ * cuts a job at six hours), or nothing is open any more. An outbid lot is
+ * never raised — one bid per lot, at the max, is the whole method — but a
+ * copy of a card the per-card cap held back is bid on once a copy under it is
+ * outbid, and a bid the house turned down in the rush is quoted again.
  *
- * From then on the run waits: it polls the bids it holds, and when one is
- * outbid the money that bid had committed is free again, so the next lot in
- * line gets its bid. That repeats until the auction closes, the list runs
- * out, or the job is stopped from outside (GitHub cuts a job at six hours).
+ * When the fire is, and why, is the house's own rule (Venue.fireAfterMinutes,
+ * the "fire after" box on the workflow): minutes after extended bidding was
+ * scheduled to open. At Fanatics that is 27 — lots close one by one there,
+ * and any lot nobody bids on between 7:00 and 7:30 PM PT closes at 7:30
+ * sharp, so 7:27 puts our max on the quiet lots three minutes before they
+ * close and gives the other bidder on a fought-over lot the five-minute
+ * window that follows rather than an evening. At Alt it is 100 — the whole
+ * auction extends together there and runs three to five hours past 9 PM ET,
+ * so 10:40 PM is late in the night with the auction still safely open; and
+ * because it can end the moment a window passes with no bid anywhere, a run
+ * there also fires early if the auction's clock reads seconds from its end.
  *
  * Nothing is bid without --live. The default is a plan: everything runs except
  * the bid itself, worked out against the bids the scan reported, with no
@@ -67,9 +81,10 @@
  *      that never identified. The price came from the cert and the competition
  *      is bidding off the title; when those are not the same card, the max bid
  *      is the wrong card's.
- *   6. Bidding. scripts/sniper-book.ts holds all of it: the budget, the bid
- *      ladder, and the one rule with money behind it — the amount sent is never
- *      above the lot's max hammer.
+ *   6. The hold, the fire, and the watch. scripts/sniper-book.ts holds the
+ *      money side: the ceiling, the bid ladder, the fire itself, and the one
+ *      rule with money behind it — the amount sent is never above the lot's
+ *      max hammer.
  *
  * The run ends with a funnel: every stage's cut, named, in one column, and
  * writes one file worth keeping, <venue>-bids.csv: every lot worth a bid,
@@ -78,8 +93,14 @@
  * same thing as a page, for the Actions run summary.
  *
  * Flags, the same for every venue:
- *   --budget=250          what this run may commit, all-in. Bids already on
- *                         the account do not count against it (default $100)
+ *   --budget=10000        a ceiling on what this run may hold at once, all-in
+ *                         — not a target; the bids go on down the list as far
+ *                         as it reaches. Bids already on the account do not
+ *                         count against it (default $10,000)
+ *   --fire-after=27       minutes after extended bidding opens to put the
+ *                         bids on; the FIRE_AFTER_MINUTES environment variable
+ *                         does the same, for a workflow input (default: the
+ *                         venue's own — Fanatics 27, Alt 100)
  *   --tiers-psa=…         the tier table for PSA, and --tiers-cgc=… for CGC,
  *                         written as "$7.50-8: flat $5, $8-10: market - $3,
  *                         $10-90: 85%, $90-450: 80%" (see TierTable); the
@@ -138,6 +159,7 @@ import {
   BUYERS_PREMIUM,
   BidBook,
   DEFAULT_BUDGET_DOLLARS,
+  bidAmount,
   dollars,
   type AuctionState,
   type Biddable,
@@ -369,6 +391,59 @@ export function maxCopiesFromArgs(env: Record<string, string | undefined> = proc
 }
 
 /**
+ * When the bids go on, as this run was told: --fire-after, else the
+ * FIRE_AFTER_MINUTES environment variable, else the venue's own default.
+ * Minutes after extended bidding was scheduled to open; 0 is the open itself.
+ * Anything that is not a number of minutes stops the run before the scan.
+ */
+export function fireAfterFromArgs(defaultMinutes: number, env: Record<string, string | undefined> = process.env): number {
+  const text = opt("fire-after", env.FIRE_AFTER_MINUTES ?? "").trim();
+  if (!text) return defaultMinutes;
+  const minutes = Number(text);
+  if (!Number.isFinite(minutes) || minutes < 0) {
+    throw new Error(`--fire-after must be a number of minutes, 0 or more, got "${text}"`);
+  }
+  return minutes;
+}
+
+/** The moment the bids go on: so many minutes after extended bidding was scheduled to open. */
+export function fireAtUnixS(scheduledOpenUnixS: number, fireAfterMinutes: number): number {
+  return scheduledOpenUnixS + Math.round(fireAfterMinutes * 60);
+}
+
+/**
+ * Whether the bids should go on now.
+ *
+ * At the fire time, yes. Before it, only at a house that ends the whole
+ * auction together, and only when its own clock — the end that every bid
+ * pushes out — reads DEADMAN_S or less from now with extended bidding under
+ * way: a window about to pass with no bid anywhere is the auction about to
+ * close, and the bids have to be on before that. A house whose lots close one
+ * by one has no such moment; its end never moves.
+ */
+export function timeToFire(opts: { nowUnixS: number; fireAtUnixS: number; closesTogether: boolean; auction: Pick<AuctionState, "status" | "endsAtUnixS"> | null }): { fire: true; why: string } | { fire: false } {
+  if (opts.nowUnixS >= opts.fireAtUnixS) return { fire: true, why: "the fire time" };
+  const a = opts.auction;
+  if (opts.closesTogether && a && a.status === "EXTENDED_BIDDING" && a.endsAtUnixS > 0) {
+    const left = a.endsAtUnixS - opts.nowUnixS;
+    if (left <= DEADMAN_S) return { fire: true, why: `the auction's clock reads ${Math.max(0, left)}s from the end` };
+  }
+  return { fire: false };
+}
+
+/**
+ * Why a lot is not worth quoting at the fire, from a re-scan's snapshot of its
+ * bidding: the least the house would take next is already past our max. Null
+ * while a bid at or under the max is still possible. The snapshot has no
+ * starting price, so a lot with no bids yet is always still possible — which
+ * is the fail-open way round.
+ */
+export function pricedOut(row: Pick<Biddable, "maxHammerCents">, snapshot: { currentBidCents: number; bidCount: number }, steps: BidSteps): string | null {
+  const amount = bidAmount(row, { currentBidCents: snapshot.currentBidCents, startingPriceCents: 0, bidCount: snapshot.bidCount }, steps);
+  return "skip" in amount ? amount.skip : null;
+}
+
+/**
  * Cert price lookups in flight at once. They cost no credits.
  *
  * Measured on 2026-09-07 against the live backend, 240 certs a level, one
@@ -485,6 +560,35 @@ const CU_TOKEN_REFRESH_MS = 10 * 60_000;
  * log shows a run that is alive and waiting rather than one that has hung.
  */
 const HEARTBEAT_MS = 5 * 60_000;
+
+// ── The fire ──────────────────────────────────────────────────────────────────
+
+/**
+ * The re-scans of the house — the same scan as at the start, without the
+ * certs — begin this long before the fire and repeat this often. Each one says
+ * where every priced lot's bidding stands, so the run knows how much of its
+ * list the room has already taken past the max, and the fire has fewer lots to
+ * quote.
+ */
+const RESCAN_FROM_S = 30 * 60;
+const RESCAN_EVERY_S = 5 * 60;
+/**
+ * Lots quoted and bid at once at the fire. One at a time is 0.66 s a lot,
+ * measured on 2026-09-13 — ten minutes for a 900-lot list, against a
+ * three-minute cliff at Fanatics. Eight at once is well under a minute.
+ */
+const FIRE_CONCURRENCY = 8;
+/**
+ * At a house that ends the whole auction together (Alt), the bids go on the
+ * moment its clock reads this close to the end, whatever the time: a quiet
+ * window there closes every lot at once, and a run still holding would have
+ * bid on nothing. Read against a 15-second window, so kept well under it.
+ */
+const DEADMAN_S = 8;
+/** How often that clock is read while holding once extended bidding is on. */
+const HOLD_POLL_EXTENDED_S = 3;
+/** And otherwise: nothing can end, so once a minute is plenty. */
+const HOLD_POLL_S = 60;
 
 // ── Chase list ────────────────────────────────────────────────────────────────
 
@@ -1907,13 +2011,28 @@ export interface Venue {
    * bulk. Alt: no — every PSA/CGC Pokémon lot in the cycle is a candidate.
    */
   chaseList: boolean;
+  /**
+   * Whether the whole auction extends and ends together (Alt: any bid anywhere
+   * pushes every lot's close out, and one quiet window closes all of it) or
+   * the lots close one by one on a fixed schedule (Fanatics). The former can
+   * end before the fire time, so a run there watches the clock for it.
+   */
+  closesTogether: boolean;
+  /**
+   * When the bids go on, unless the run is told otherwise: minutes after
+   * extended bidding was scheduled to open. The house's own rule for closing
+   * decides it — see each venue's file.
+   */
+  fireAfterMinutes: number;
   /** The lot's page, so a log line can be clicked through to what was bid on. */
   listingUrl(listingId: string): string;
   /**
    * Every live PSA/CGC 7–10 Pokémon lot in the auction about to close, and when
-   * that auction's extended bidding starts.
+   * that auction's extended bidding is scheduled to start. A `light` scan is
+   * the same read for nothing but where each lot's bidding stands — no certs,
+   * no chatter — and is taken every few minutes before the fire.
    */
-  scan(opts: { headed: boolean; now: Date }): Promise<{ lots: ScannedLot[]; closesAtUnixS: number }>;
+  scan(opts: { headed: boolean; now: Date; light?: boolean }): Promise<{ lots: ScannedLot[]; closesAtUnixS: number }>;
   /**
    * A signed-in session. `login` means sign in afresh with a person at the
    * keyboard; `email` names the account the run is for and is refused if the
@@ -1973,6 +2092,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   // a run that should not start.
   setTierTable(tiersFromArgs());
   setMaxCopiesPerCard(maxCopiesFromArgs());
+  const fireAfterMin = fireAfterFromArgs(venue.fireAfterMinutes);
 
   const now = new Date();
   const startedMs = Date.now();
@@ -1990,13 +2110,14 @@ export async function runSniper(venue: Venue): Promise<void> {
       : `🎯  ${venue.name} sniper — planning against the scan's own bid snapshot, sending nothing\n`);
 
   console.log(`    output       ${outDir}`);
-  console.log(`    budget       ${dollars(budgetCents)} all-in for this run (hammer + ${Math.round(BUYERS_PREMIUM * 100)}% buyer's premium); bids already on the account are left alone${countExistingBids ? " and charged to this budget" : " and not counted"}`);
+  console.log(`    ceiling      ${dollars(budgetCents)} all-in at once for this run (hammer + ${Math.round(BUYERS_PREMIUM * 100)}% buyer's premium); bids already on the account are left alone${countExistingBids ? " and charged to it" : " and not counted"}`);
+  console.log(`    fire         ${fireAfterMin} min after extended bidding opens${venue.closesTogether ? ", or the moment the auction reads seconds from its end" : ""}${live ? "" : " — for a live run; this one sends nothing"}`);
   console.log(`    max cards    ${maxCards > 0 ? maxCards : "every candidate"}`);
   console.log(`    batch        ${batchSize} cert(s) priced per round, ${concurrency} at a time; every candidate is priced`);
   for (const grader of GRADERS) console.log(`    tiers ${grader}    ${formatTiers(tierTable()[grader])}`);
   console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader`);
   console.log(`    sales rule   ${MIN_SALES} sales, every one inside the last ${SALES_WINDOW_DAYS} days`);
-  if (live) console.log(`    poll         every ${pollS}s, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s once extended bidding starts`);
+  if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
   if (wantEmail) console.log(`    account      ${wantEmail}`);
   console.log();
 
@@ -2006,7 +2127,10 @@ export async function runSniper(venue: Venue): Promise<void> {
   const lots = scanned.lots;
   const closesAt = scanned.closesAtUnixS;
   console.log(`    ${lots.length} live PSA/CGC 7–10 Pokémon lot(s)`);
-  if (Number.isFinite(closesAt)) console.log(`    ${untilClose(closesAt)}  (${fmtLocal(closesAt, venue.timeZone, venue.zoneLabel)})`);
+  if (Number.isFinite(closesAt)) {
+    console.log(`    ${untilClose(closesAt)}  (${fmtLocal(closesAt, venue.timeZone, venue.zoneLabel)})`);
+    console.log(`    the bids go on at ${fmtLocal(fireAtUnixS(closesAt, fireAfterMin), venue.timeZone, venue.zoneLabel)}${live ? "" : " — in a live run"}`);
+  }
 
   // 2. Chase list, where the house has one.
   const selected = selectCandidates(lots, (line) => console.log(line), { chaseList: venue.chaseList });
@@ -2055,7 +2179,11 @@ export async function runSniper(venue: Venue): Promise<void> {
 
     const book = new BidBook(session, { budgetCents, live, log, steps: venue.steps, listingUrl: venue.listingUrl, caps: cardCaps(), countInherited: countExistingBids });
     if (session) await book.seed();
-    log("start", { mode, budgetCents, countExistingBids, chaseList: candidates.length });
+    log("start", { mode, budgetCents, countExistingBids, fireAfterMin, chaseList: candidates.length });
+    /** Lots a re-scan found already past the max, and why — kept out of the fire and said so in the CSV. */
+    const pricedOutBy = new Map<string, string>();
+    /** Whether the bids have gone on. Before that a live run holds; after it, it watches. */
+    let fired = false;
 
     /**
      * One round: price a batch of candidates, work out which are worth a bid,
@@ -2186,13 +2314,18 @@ export async function runSniper(venue: Venue): Promise<void> {
       console.log(`    ${cut.worthy.length} worth a bid this round, ${worthy.length} so far`);
 
       // The pool is rebuilt in priority order every round: a later batch can
-      // hold a better lot than an earlier one, and the budget should meet the
-      // best of what is known rather than the first thing found.
+      // hold a better lot than an earlier one, and the fire should meet the
+      // best of what is known rather than the first thing found. A plan bids
+      // (on paper) as it goes; a live run holds everything for the fire, and
+      // only a round priced after it hands its lots to the watch below.
       bidding.sort((a, b) => a.priority - b.priority || Number(b.headroom) - Number(a.headroom));
-      const pool = bidding.map((row) => toBiddable(row)!);
-      const filled = await book.fill(pool);
-      if (filled.auctionClosed) auctionClosed = true;
-      console.log(`    ${book.standing()}`);
+      if (!live || fired) {
+        const filled = await book.fill(pool());
+        if (filled.auctionClosed) auctionClosed = true;
+        console.log(`    ${book.standing()}`);
+      } else {
+        console.log(`    ${pool().length} lot(s) priced and held for the fire`);
+      }
 
       // Where the pricing stands, and when it will be done at this pace: the
       // number to read against the time to the close.
@@ -2206,7 +2339,8 @@ export async function runSniper(venue: Venue): Promise<void> {
       console.log();
     };
 
-    const pool = () => bidding.map((row) => toBiddable(row)!);
+    /** What the book may act on: every priced lot a re-scan has not already found past the max. */
+    const pool = () => bidding.filter((row) => !pricedOutBy.has(row.listing_id)).map((row) => toBiddable(row)!);
 
     /** The next slice of the list, shorter when the close is near so the bids are looked at between them. */
     const nextBatch = (): Candidate[] => {
@@ -2228,8 +2362,12 @@ export async function runSniper(venue: Venue): Promise<void> {
     // The auction's own clock, shared by the pricing loop and the hold loop.
     // Until the house has been asked, the scan's end time stands in for it.
     const state: { auction: AuctionState | null } = { auction: null };
-    const secondsToClose = () => (state.auction?.endsAtUnixS || closesAt) - Math.floor(Date.now() / 1_000);
+    /** Seconds until extended bidding opens (negative once it has): the advertised close, which does not move. */
+    const secondsToClose = () => (state.auction?.scheduledEndUnixS || closesAt) - Math.floor(Date.now() / 1_000);
     const phase = () => state.auction?.status ?? (secondsToClose() > 0 ? "LIVE" : "EXTENDED_BIDDING");
+    /** When the bids go on, on the house's own clock once it has been read. */
+    const fireAt = () => fireAtUnixS(state.auction?.scheduledEndUnixS || closesAt, fireAfterMin);
+    const fireDue = () => timeToFire({ nowUnixS: Math.floor(Date.now() / 1_000), fireAtUnixS: fireAt(), closesTogether: venue.closesTogether, auction: state.auction });
 
     /**
      * Read every bid back, then spend whatever came free.
@@ -2246,6 +2384,9 @@ export async function runSniper(venue: Venue): Promise<void> {
       const polled = await book.poll();
       state.auction = polled.auction ?? state.auction;
       if (polled.auctionClosed) { auctionClosed = true; return { changes: polled.changes, freed: polled.freed, placed: 0 }; }
+      // Before the fire there is nothing to spend on: the poll is for the
+      // clock and for what the account was already carrying.
+      if (!fired) return { changes: polled.changes, freed: polled.freed, placed: 0 };
       const filled = await book.fill(pool());
       if (filled.auctionClosed) auctionClosed = true;
       return { changes: polled.changes, freed: polled.freed, placed: filled.placed };
@@ -2261,22 +2402,23 @@ export async function runSniper(venue: Venue): Promise<void> {
       await pollAndFill();
     };
 
-    let extendedEarly = false;
+    let fireCameFirst = false;
     while (needMore()) {
       await priceRound(nextBatch());
       await pollAndFill();
       if (auctionClosed) break;
-      // Once the lots start closing, answering an outbid beats finding another
-      // lot to bid on. The hold loop below prices what it can between polls.
-      if (live && phase() === "EXTENDED_BIDDING") {
-        extendedEarly = true;
-        console.log(`    extended bidding has started — pricing gives way to watching the bids\n`);
+      // A run started too late to price everything before the fire fires
+      // with what it has; the watch below prices the rest between polls and
+      // bids on it as it comes.
+      if (live && fireDue().fire) {
+        fireCameFirst = true;
+        console.log(`    the fire time has come with ${candidates.length - cursor} candidate(s) unpriced — the bids go on now, the rest are priced after\n`);
         break;
       }
     }
 
     // The patient pass over whatever never answered, now that nothing waits on it.
-    if (!auctionClosed && !extendedEarly && stragglers().length > 0) {
+    if (!auctionClosed && !fireCameFirst && stragglers().length > 0) {
       await priceRound(stragglers(), true);
       await pollAndFill();
     }
@@ -2285,10 +2427,96 @@ export async function runSniper(venue: Venue): Promise<void> {
       console.log(`    ${candidates.length - cursor} candidate(s) left unpriced\n`);
     }
 
-    // 4. Wait it out. An outbid lot frees what it was holding, which buys the
-    //    next lot down; whatever is left of the list is priced between polls.
+    // 4. Hold. Nothing is bid until the fire: the clock is read, and from
+    //    half an hour out the house is re-scanned every few minutes so the run
+    //    knows which of its lots the room has already taken past the max.
+    /**
+     * The same scan as at the start, for where the bidding stands now. A lot
+     * the least next bid has passed the max on is out of the fire; one the
+     * scan did not return keeps its place — a partial answer from the index is
+     * not the lot going anywhere, and the fire quotes it anyway.
+     */
+    const rescan = async () => {
+      const started = Date.now();
+      let fresh: { lots: ScannedLot[] };
+      try {
+        fresh = await venue.scan({ headed, now: new Date(), light: true });
+      } catch (err) {
+        console.warn(`    ⚠️  re-scan failed (${err instanceof Error ? err.message : err}); the last look stands`);
+        return;
+      }
+      const byId = new Map(fresh.lots.map((l) => [l.listingId, l]));
+      let under = 0;
+      let out = 0;
+      let unseen = 0;
+      for (const row of bidding) {
+        if (pricedOutBy.has(row.listing_id) || book.settled.has(row.listing_id)) continue;
+        const biddable = toBiddable(row);
+        if (!biddable) continue;
+        const lot = byId.get(row.listing_id);
+        if (!lot) { unseen++; under++; continue; }
+        row.current_bid = lot.currentBid;
+        row.bid_count = lot.bidCount;
+        row.headroom = round2(Number(row.max_bid_hammer) - lot.currentBid);
+        const why = pricedOut(biddable, { currentBidCents: Math.round(lot.currentBid * 100), bidCount: lot.bidCount }, venue.steps);
+        if (why) { pricedOutBy.set(row.listing_id, `passed the max before the bids went on — ${why}`); out++; } else under++;
+      }
+      console.log(`    ${clock()} ${venue.zoneLabel}  ·  re-scan in ${((Date.now() - started) / 1000).toFixed(0)}s: ${under} lot(s) still under the max, ${out} passed it since the last look${unseen > 0 ? ` (${unseen} not in this scan, kept)` : ""}, ${pricedOutBy.size} out in all`);
+      log("rescan", { under, out, unseen, outInAll: pricedOutBy.size });
+    };
+
+    if (live && !auctionClosed && !fired) {
+      console.log(`  ── holding  ·  the bids go on at ${fmtLocal(fireAt(), venue.timeZone, venue.zoneLabel)}, ${fireAfterMin} min after extended bidding opens${venue.closesTogether ? ", or the moment the auction reads seconds from its end" : ""}`);
+      console.log(`     ${pool().length} lot(s) priced and held; the house is re-scanned every ${RESCAN_EVERY_S / 60} min from ${RESCAN_FROM_S / 60} min out`);
+      let lastRescanMs = 0;
+      let lastSpoke = Date.now();
+      for (;;) {
+        // The house's own clock, read directly: cheap, and the only thing
+        // that can move the fire.
+        if (session) {
+          const read = await session.readAuction(state.auction?.id ?? "").catch(() => null);
+          if (read) state.auction = read;
+          if (read?.status === "CLOSED") { auctionClosed = true; break; }
+        }
+        const due = fireDue();
+        if (due.fire) { console.log(`    ${clock()} ${venue.zoneLabel}  ·  ${due.why}`); break; }
+
+        const nowS = Math.floor(Date.now() / 1_000);
+        if (fireAt() - nowS <= RESCAN_FROM_S && Date.now() - lastRescanMs >= RESCAN_EVERY_S * 1_000) {
+          await rescan();
+          lastRescanMs = Date.now();
+        }
+        if (Date.now() - lastSpoke >= HEARTBEAT_MS) {
+          const at = state.auction;
+          console.log(`  ── ${clock()} ${venue.zoneLabel}  ·  ${at ? `${at.name} ${at.status.toLowerCase().replace("_", " ")}` : untilClose(closesAt)}  ·  ${Math.max(0, Math.round((fireAt() - nowS) / 60))} min to the fire  ·  ${pool().length} lot(s) held, ${pricedOutBy.size} out`);
+          log("holding", { minutesToFire: Math.round((fireAt() - nowS) / 60), held: pool().length, out: pricedOutBy.size, auction: at?.status });
+          lastSpoke = Date.now();
+        }
+        // In extended bidding at a house that ends as one, the clock is the
+        // whole game and is read every few seconds; otherwise nothing can end
+        // and once a minute is plenty.
+        const extended = phase() === "EXTENDED_BIDDING";
+        await sleep((venue.closesTogether && extended ? HOLD_POLL_EXTENDED_S : HOLD_POLL_S) * 1_000);
+      }
+    }
+
+    // 5. Fire. Everything priced and still under the max, all at once.
+    if (live && !auctionClosed && !fired) {
+      const firing = Date.now();
+      console.log(`  ── ${clock()} ${venue.zoneLabel}  ·  the bids go on`);
+      const shot = await book.fire(pool(), { concurrency: FIRE_CONCURRENCY });
+      fired = true;
+      if (shot.auctionClosed) auctionClosed = true;
+      console.log(`    ${shot.placed} bid(s) on in ${((Date.now() - firing) / 1000).toFixed(1)}s, of ${shot.picked} picked`);
+      console.log(`    ${book.standing()}`);
+      log("fired", { picked: shot.picked, placed: shot.placed, exposureCents: shot.exposureCents, seconds: (Date.now() - firing) / 1000 });
+    }
+
+    // 6. Watch. An outbid copy frees its place under the per-card cap for the
+    //    next copy; a bid the house turned down in the rush is quoted again;
+    //    whatever is left of the list is priced between polls.
     if (live) {
-      console.log(`  ── holding  ·  ${untilClose(closesAt)}  ·  looking every ${pollS}s, oftener as it closes`);
+      console.log(`  ── watching the bids  ·  looking every ${pollS}s, oftener as it closes`);
       let lastSpoke = 0;
       let polls = 0;
       for (;;) {
@@ -2328,14 +2556,14 @@ export async function runSniper(venue: Venue): Promise<void> {
           const where = at ? `${at.name} ${at.status.toLowerCase().replace("_", " ")}` : untilClose(closesAt);
           console.log(`  ── ${clock()} ${venue.zoneLabel}  ·  ${where}  ·  ${untilClose(closesAt)}  ·  ${polls} poll(s), ${since(startedMs)} in`);
           console.log(`     ${standing}`);
-          console.log(`     ${book.waiting(pool())} lot(s) priced and waiting for the budget, ${cursor} of ${candidates.length} candidate(s) priced`);
+          console.log(`     ${book.waiting(pool())} lot(s) priced and not bid on, ${cursor} of ${candidates.length} candidate(s) priced`);
           log("heartbeat", { polls, standing, waiting: book.waiting(pool()), priced: cursor, auction: at?.status });
           lastSpoke = Date.now();
         }
       }
       console.log(auctionClosed
         ? `\n    the auction has closed`
-        : `\n    nothing open on the account and nothing more the budget reaches`);
+        : `\n    nothing open on the account and nothing more the ceiling reaches`);
 
       const result = book.result();
       console.log(`\n  ── result after ${since(startedMs)}`);
@@ -2351,16 +2579,17 @@ export async function runSniper(venue: Venue): Promise<void> {
       });
     }
 
-    // 5. What happened, written onto the rows the CSV is made of.
+    // 7. What happened, written onto the rows the CSV is made of.
     //
-    //    Sorted the way the budget met them, so the file reads as the run did:
+    //    Sorted the way the fire met them, so the file reads as the run did:
     //    what was bid on and how it ended, then — in order — what the next
-    //    bid would have gone to had the money come free.
+    //    bid would have gone to had the ceiling reached it.
     worthy.sort((a, b) => a.priority - b.priority || Number(b.headroom) - Number(a.headroom));
     const placedBy = new Map(book.placed.map((b) => [b.listingId, b]));
     const inheritedBy = new Map(book.inherited.map((b) => [b.listingId, b]));
     const skippedBy = new Map(book.skipped.map((s) => [s.listingId, s]));
     let queue = 0;
+    let pricedOutCount = 0;
     for (const row of worthy) {
       const id = row.listing_id;
       const bid = placedBy.get(id);
@@ -2383,6 +2612,8 @@ export async function runSniper(venue: Venue): Promise<void> {
       }
       const skipped = skippedBy.get(id);
       if (skipped) { row.bid_status = `not bid: ${skipped.reason}`; continue; }
+      const out = pricedOutBy.get(id);
+      if (out) { row.bid_status = `not bid: ${out}`; pricedOutCount++; continue; }
       if (!toBiddable(row)) { row.bid_status = "not bid: see flags"; continue; }
       row.bid_rank = ++queue;
       row.bid_status = "next in line";
@@ -2424,9 +2655,10 @@ export async function runSniper(venue: Venue): Promise<void> {
 
     cut(notBiddable, "unidentified, so not bid on");
     cut(book.inherited.length, "already carrying a bid of this account's, left alone");
+    cut(pricedOutCount, "passed the max before the bids went on");
     cut(book.skipped.length, `passed over at ${venue.name} — closed, or past the max`);
-    cut(worthy.length - notBiddable - book.inherited.length - book.skipped.length - book.placed.length,
-      "left waiting — beyond what the budget had free");
+    cut(worthy.length - notBiddable - book.inherited.length - book.skipped.length - pricedOutCount - book.placed.length,
+      "left waiting — beyond the ceiling");
     lines.push({ kind: "rule" }, { kind: "total", n: book.placed.length, label: live ? "bid on" : "would be bid on" });
 
     console.log(funnelText(lines));

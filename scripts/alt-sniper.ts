@@ -7,8 +7,14 @@
  *
  * Alt Auctions run two weeks each, overlapping, so one closes every Thursday:
  * extended bidding opens at 9 PM ET and the whole auction extends together —
- * any bid inside a window (two minutes, then one, then 30 seconds, then 15)
- * pushes every lot's close out — until a window passes with no bid.
+ * any bid on any lot pushes every lot's close out by the window of the hour
+ * (two minutes until 9:30, one until 10:00, 30 seconds until 10:30, 15 from
+ * then on) — until a window passes with no bid anywhere. Nothing closes
+ * early, and the whole thing runs three to five hours: the 26 auctions to
+ * 2026-09-10 ended between 12:03 and 2:30 AM, bar one holiday-week Friday
+ * that ended at 10:45 PM. So the bids go on late — 100 minutes in by default,
+ * 10:40 PM — and an outbid bidder has only what is left of the night to
+ * answer, rather than all of it.
  *
  * The scan. The site's catalogue is a Typesense index; the search page fetches
  * a ten-minute scoped key for it from the site's own GraphQL (no account
@@ -98,6 +104,23 @@ type Doc = {
 
 type Cycle = { id: number; name: string | null; state: string | null; expiresAt: string | null };
 
+/**
+ * When a cycle was advertised to close — 9 PM ET on its Thursday. The list
+ * of cycles carries only the moving end, which before extended bidding reads
+ * five minutes past the advertised close; the cycle's own record has the
+ * original, and that is what the fire time is counted from.
+ */
+async function scheduledCloseUnixS(cycle: Cycle): Promise<number> {
+  const fallback = Math.floor(Date.parse(cycle.expiresAt ?? "") / 1000) || 0;
+  try {
+    const data = await gqlPublic<{ auctionCycle: { originalExpiresAt: string | null } | null }>(
+      "AuctionCycle", `query AuctionCycle { auctionCycle(id: ${Number(cycle.id)}) { id originalExpiresAt } }`);
+    return Math.floor(Date.parse(data.auctionCycle?.originalExpiresAt ?? "") / 1000) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 /** Holds the scoped search key and fetches a fresh one before it lapses. */
 class SearchKey {
   private url = "";
@@ -156,7 +179,7 @@ export function pickCycles(cycles: Cycle[], nowS: number): { chosen: Cycle[]; sk
 }
 
 /** A search document as the pipeline reads it. The cert is filled in afterwards. */
-export function toLot(doc: Doc, cycle: Cycle): ScannedLot {
+export function toLot(doc: Doc, cycle: Cycle, closesAtUnixS?: number): ScannedLot {
   const title = doc.itemName ?? doc.name ?? "";
   const pristine = doc.gradeKey === CGC_PRISTINE_KEY;
   const grade = pristine ? 10 : Number(doc.grade);
@@ -174,7 +197,7 @@ export function toLot(doc: Doc, cycle: Cycle): ScannedLot {
     lot: lotLabel(doc.listingId),
     // Alt files English and Japanese together; the title says which.
     language: /\bjapanese\b/i.test(title) ? "Japanese" : "English",
-    closesAtUnixS: Math.floor(Date.parse(cycle.expiresAt ?? "") / 1000) || doc.expiresAtEpoch,
+    closesAtUnixS: closesAtUnixS || Math.floor(Date.parse(cycle.expiresAt ?? "") / 1000) || doc.expiresAtEpoch,
   };
 }
 
@@ -193,16 +216,23 @@ async function certOf(listingId: string): Promise<string> {
  * The index is filtered to the cycle, the category and the grade keys, and
  * paged through in full — a cycle holds a thousand or so such lots. Then the
  * cert is fetched for every PSA/CGC lot, since every one is a candidate.
+ *
+ * A `light` scan is the same read of the index without the certs and without
+ * the chatter: the pipeline takes one every few minutes before the bids go
+ * on, for nothing but where each lot's bidding stands now.
  */
-async function scanAlt(now: Date): Promise<{ lots: ScannedLot[]; closesAtUnixS: number }> {
+async function scanAlt(now: Date, light = false): Promise<{ lots: ScannedLot[]; closesAtUnixS: number }> {
   const nowS = Math.floor(now.getTime() / 1000);
+  const say = light ? () => {} : (line: string) => console.log(line);
   const { auctionCycles } = await gqlPublic<{ auctionCycles: Cycle[] | null }>("AuctionCycles",
     `query AuctionCycles { auctionCycles { id name state expiresAt } }`);
   const { chosen, skipped } = pickCycles(auctionCycles ?? [], nowS);
   if (chosen.length === 0) throw new Error("No Alt Auction with a future close — nothing to scan.");
-  const ends = (c: Cycle) => Math.floor(Date.parse(c.expiresAt ?? "") / 1000) || 0;
-  console.log(`    ${chosen.length} auction(s) closing within ${AUCTION_WINDOW_DAYS} days: ${chosen.map((c) => `${c.name} (${fmtEastern(ends(c))})`).join(", ")}`);
-  if (skipped.length > 0) console.log(`    skipping ${skipped.length} later auction(s): ${skipped.map((c) => c.name).join(", ")}`);
+  const scheduled = new Map<number, number>();
+  for (const c of chosen) scheduled.set(c.id, await scheduledCloseUnixS(c));
+  const ends = (c: Cycle) => scheduled.get(c.id) || Math.floor(Date.parse(c.expiresAt ?? "") / 1000) || 0;
+  say(`    ${chosen.length} auction(s) closing within ${AUCTION_WINDOW_DAYS} days: ${chosen.map((c) => `${c.name} (${fmtEastern(ends(c))})`).join(", ")}`);
+  if (skipped.length > 0) say(`    skipping ${skipped.length} later auction(s): ${skipped.map((c) => c.name).join(", ")}`);
 
   const key = new SearchKey();
   const lots: ScannedLot[] = [];
@@ -223,12 +253,15 @@ async function scanAlt(now: Date): Promise<{ lots: ScannedLot[]; closesAtUnixS: 
       const res = await search(key, { q: "", preset: "price_desc", filter_by: filter, per_page: PAGE, page });
       found = res.found;
       got += res.hits.length;
-      for (const doc of res.hits) lots.push(toLot(doc, cycle));
+      for (const doc of res.hits) lots.push(toLot(doc, cycle, ends(cycle)));
       if (res.hits.length < PAGE) break;
       page++;
     }
-    console.log(`    ${cycle.name}: ${got} lot(s)`);
+    say(`    ${cycle.name}: ${got} lot(s)`);
   }
+
+  const closesAtUnixS = Math.min(...chosen.map(ends).filter((t) => t > 0));
+  if (light) return { lots, closesAtUnixS: Number.isFinite(closesAtUnixS) ? closesAtUnixS : Infinity };
 
   // The cert, for every lot the pipeline could price.
   const chased = lots.filter((l) => GRADERS.includes(l.grader as (typeof GRADERS)[number]));
@@ -244,7 +277,6 @@ async function scanAlt(now: Date): Promise<{ lots: ScannedLot[]; closesAtUnixS: 
   });
   if (missing > 0) console.log(`    ${missing} of those have no cert on the listing`);
 
-  const closesAtUnixS = Math.min(...chosen.map(ends).filter((t) => t > 0));
   return { lots, closesAtUnixS: Number.isFinite(closesAtUnixS) ? closesAtUnixS : Infinity };
 }
 
@@ -260,10 +292,15 @@ export const alt: Venue = {
   sessionDir: SESSION_DIR,
   steps: ALT_STEPS,
   chaseList: false,
+  // The whole auction extends together and ends together: see the note at
+  // the top. 100 minutes after 9 PM ET is 10:40 PM, inside the 15-second
+  // windows and ahead of every end but one in 26 auctions.
+  closesTogether: true,
+  fireAfterMinutes: 100,
   listingUrl,
 
-  scan({ now }) {
-    return scanAlt(now);
+  scan({ now, light }) {
+    return scanAlt(now, light ?? false);
   },
 
   open({ headed, login, email, live }) {

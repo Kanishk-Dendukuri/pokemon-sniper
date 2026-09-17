@@ -78,11 +78,15 @@ const MANUAL_LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** How long the Fanatics ID form has to draw each of its two fields. */
 const LOGIN_FIELD_TIMEOUT_MS = 45_000;
 /**
- * Bids asked for in the one account-wide read. A $5,000 budget at the flat-$5
- * end of the tier table is hundreds of open bids, and 200 — the first number
- * tried here — would have quietly cut off the tail of them.
+ * Bids asked for per page of the account-wide read, and how many pages one
+ * read may turn. The read answers for every weekly bid the account has ever
+ * placed — 2,766 of them on 2026-09-13, against a page of 500 — so it is
+ * paged, and stops early once a page after the open bids holds nothing but
+ * history. Ten pages is 5,000 bids; an account past that gets the warning
+ * below and the slow lot-by-lot path for the rest.
  */
 const ACCOUNT_BIDS_PAGE = 500;
+const ACCOUNT_BIDS_PAGES = 10;
 
 /**
  * Fanatics' bid ladder, in cents, as the site's own code has it: the step
@@ -227,11 +231,16 @@ const LISTING_QUERY = `
 /**
  * The auctions themselves, with the clock Fanatics runs them on.
  *
- * status goes LIVE, then EXTENDED_BIDDING, then CLOSED. Extended bidding runs
- * in windows — windowDurationSeconds long, windowOrdinal counting them off —
- * and a bid inside a window opens another one, which is why the end of a weekly
- * auction has no fixed time and why a run should look more often once it
- * starts. The query needs no account: the site asks it on every page load.
+ * status goes LIVE, then EXTENDED_BIDDING, then CLOSED. Extended bidding opens
+ * at 7:00 PM PT and closes lots one by one, on the rule in the help centre: a
+ * lot with no bid between 7:00 and 7:30 closes at 7:30 sharp; one still open
+ * after 7:30 closes five minutes after its last bid; after 8:00, one minute
+ * after. The timer here counts those windows off — windowDurationSeconds
+ * long, windowOrdinal numbering them (60 s once the auction is over, whatever
+ * phase it closed in). So a weekly auction has no fixed end, only a fixed
+ * 7:30 cliff for every lot nobody has fought over, which is why the bids go
+ * on just before it. The query needs no account: the site asks it on every
+ * page load.
  */
 const AUCTIONS_QUERY = `
   query webGlobalAuctionsQuery {
@@ -254,9 +263,10 @@ const AUCTIONS_QUERY = `
 `;
 
 const ACTIVE_BIDS_QUERY = `
-  query webGetActiveAuctionsBidsQuery($listingTypes: [CollectListingType], $first: Int) {
+  query webGetActiveAuctionsBidsQuery($listingTypes: [CollectListingType], $first: Int, $after: String) {
     collectCurrentUserV2 {
-      collectListings(includeBids: true, listingTypes: $listingTypes, first: $first) {
+      collectListings(includeBids: true, listingTypes: $listingTypes, first: $first, after: $after) {
+        pageInfo { hasNextPage endCursor }
         edges {
           node {
             id
@@ -510,7 +520,7 @@ export class FanaticsSession implements Session {
   async readAuction(auctionId: string): Promise<AuctionState | null> {
     type Node = {
       __typename?: string; id?: string | null; name?: string | null; status?: string | null; endsAt?: string | null;
-      collectListingTimer?: { windowEndsAt?: string | null; windowOrdinal?: number | null } | null;
+      collectListingTimer?: { windowEndsAt?: string | null; windowOrdinal?: number | null; windowDurationSeconds?: number | null } | null;
     };
     const data = await this.gql<{ collectGlobalAuctions: Node[] | null }>(
       "webGlobalAuctionsQuery", AUCTIONS_QUERY, {}, { auth: false });
@@ -526,9 +536,13 @@ export class FanaticsSession implements Session {
       id: mine.id,
       name: mine.name ?? "",
       status: mine.status ?? "",
+      // Fanatics closes lots one by one, so the auction's own end is the fixed
+      // moment extended bidding opened; both fields say the same thing here.
       endsAtUnixS: unixS(mine.endsAt),
+      scheduledEndUnixS: unixS(mine.endsAt),
       windowEndsAtUnixS: unixS(mine.collectListingTimer?.windowEndsAt),
       windowOrdinal: mine.collectListingTimer?.windowOrdinal ?? null,
+      windowSeconds: mine.collectListingTimer?.windowDurationSeconds ?? 0,
     };
   }
 
@@ -543,34 +557,52 @@ export class FanaticsSession implements Session {
             states: { userMaxBid: { amountInCents: number } | null; userBidStatus: string | null; isClosed: boolean | null } | null;
             auction: { id: string | null; status: string | null } | null;
           } }[];
+          pageInfo: { hasNextPage: boolean | null; endCursor: string | null } | null;
           total: number | null;
         } | null;
       } | null;
     };
-    const data = await this.gql<Data>("webGetActiveAuctionsBidsQuery", ACTIVE_BIDS_QUERY, { listingTypes: ["WEEKLY"], first: ACCOUNT_BIDS_PAGE });
-
     const bids = new Map<string, AccountBid>();
-    for (const { node } of data.collectCurrentUserV2?.collectListings?.edges ?? []) {
-      bids.set(node.id, {
-        listingId: node.id,
-        title: node.title ?? "",
-        lot: node.lotString ?? "",
-        maxCents: node.states?.userMaxBid?.amountInCents ?? 0,
-        status: asStatus(node.states?.userBidStatus),
-        closed: node.states?.isClosed ?? false,
-        currentBidCents: node.currentBid?.amountInCents ?? 0,
-        highestBidder: node.highestBidder ?? false,
-        auctionId: node.auction?.id ?? "",
-        auctionStatus: node.auction?.status ?? "",
-      });
+    let after: string | null = null;
+    let seenOpen = false;
+    let total = 0;
+    let more = false;
+    for (let page = 1; page <= ACCOUNT_BIDS_PAGES; page++) {
+      const data: Data = await this.gql<Data>("webGetActiveAuctionsBidsQuery", ACTIVE_BIDS_QUERY, { listingTypes: ["WEEKLY"], first: ACCOUNT_BIDS_PAGE, after });
+      const listings = data.collectCurrentUserV2?.collectListings;
+      total = listings?.total ?? total;
+      let openHere = 0;
+      for (const { node } of listings?.edges ?? []) {
+        const status = node.auction?.status ?? "";
+        const open = !(node.states?.isClosed ?? false) && (status === "LIVE" || status === "EXTENDED_BIDDING" || status === "");
+        if (open) openHere++;
+        bids.set(node.id, {
+          listingId: node.id,
+          title: node.title ?? "",
+          lot: node.lotString ?? "",
+          maxCents: node.states?.userMaxBid?.amountInCents ?? 0,
+          status: asStatus(node.states?.userBidStatus),
+          closed: node.states?.isClosed ?? false,
+          currentBidCents: node.currentBid?.amountInCents ?? 0,
+          highestBidder: node.highestBidder ?? false,
+          auctionId: node.auction?.id ?? "",
+          auctionStatus: status,
+        });
+      }
+      more = listings?.pageInfo?.hasNextPage ?? false;
+      after = listings?.pageInfo?.endCursor ?? null;
+      // The open bids sit together in the list, whichever end it starts from.
+      // A page with none, after pages that had some, is the far side of them:
+      // nothing past it is a bid this run could be holding.
+      if (openHere > 0) seenOpen = true;
+      else if (seenOpen) { more = false; }
+      if (!more || !after) break;
     }
-    // One page is all this asks for, so a bigger account than the page is the
-    // one thing that would quietly make the read partial. Said once, loudly:
-    // the lots it leaves out are quoted one by one by the book, which is slow.
-    const total = data.collectCurrentUserV2?.collectListings?.total ?? bids.size;
-    if (total > bids.size && !this.warnedTruncated) {
+    // Ten pages and still more: the lots left out are quoted one by one by
+    // the book, which is slow. Said once, loudly.
+    if (more && !this.warnedTruncated) {
       this.warnedTruncated = true;
-      console.warn(`    ⚠️  this account has ${total} weekly bids and the read returns ${bids.size} — the rest are quoted lot by lot`);
+      console.warn(`    ⚠️  this account has ${total} weekly bids and the read stopped at ${bids.size} — the rest are quoted lot by lot`);
     }
     return bids;
   }

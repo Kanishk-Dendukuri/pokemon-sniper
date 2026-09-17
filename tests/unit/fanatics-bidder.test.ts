@@ -146,8 +146,8 @@ describe("the budget", () => {
     expect(committedCents([placed({ status: "OUTBID", closed: false })])).toBe(0);
   });
 
-  test("the default budget is $100", () => {
-    expect(DEFAULT_BUDGET_DOLLARS).toBe(100);
+  test("the default budget is a $10,000 ceiling, not a $100 target", () => {
+    expect(DEFAULT_BUDGET_DOLLARS).toBe(10_000);
   });
 
   test("the next lot is the first on the list the free budget covers, skipping what is decided", () => {
@@ -567,5 +567,141 @@ describe("what became of a bid", () => {
   test("this run's own two: never sent, and sent but not seen again", () => {
     expect(bidOutcome({ status: "PLANNED", closed: false })).toBe("would bid");
     expect(bidOutcome({ status: "PENDING", closed: false })).toBe("bid sent, standing unknown");
+  });
+});
+
+/**
+ * The fire: every pick at once, best lot first, the ceiling and the cap
+ * counted as fill() would count them one bid at a time, and nothing read back.
+ */
+describe("the fire", () => {
+  const quoteOf = (row: Biddable) => ({
+    id: row.listingId, title: row.title, lot: row.lot,
+    currentBidCents: row.currentBidCents, startingPriceCents: 500, bidCount: row.bidCount,
+    highestBidder: false, isOwner: false, userMaxBidCents: 0, userCanBuy: true,
+    userBidStatus: "NO_BIDS" as const, isClosed: false, auctionId: "1", auctionStatus: "LIVE",
+  });
+  const pool = (n: number, cents = 1_000) =>
+    Array.from({ length: n }, (_, i) => lot({ listingId: `lot-${i}`, maxHammerCents: cents, maxAllInCents: allInCents(cents), currentBidCents: 500 }));
+  /** The house's answer for one of those lots: standing at $5, our max $10 still in reach. */
+  const quoteFor = (id: string) => quoteOf(lot({ listingId: id, maxHammerCents: 1_000, maxAllInCents: 1_200, currentBidCents: 500 }));
+
+  test("picks down the list as far as the ceiling reaches, and a cheaper lot further down still fits", async () => {
+    const rows = [
+      lot({ listingId: "a", maxHammerCents: 8_000 }),   // $96 all-in
+      lot({ listingId: "b", maxHammerCents: 4_000 }),   // $48
+      lot({ listingId: "c", maxHammerCents: 3_000 }),   // $36
+      lot({ listingId: "d", maxHammerCents: 500, maxAllInCents: 600, currentBidCents: 300, bidCount: 1 }),  // $6
+    ];
+    const b = new BidBook(null, { budgetCents: 9_000, live: false, log: () => {} });
+    const shot = await b.fire(rows, { concurrency: 8 });
+    // a does not fit a $90 ceiling; b, c and d do, in order.
+    expect(b.placed.map((p) => p.listingId)).toEqual(["b", "c", "d"]);
+    expect(shot.picked).toBe(3);
+    expect(shot.exposureCents).toBe(4_800 + 3_600 + 600);
+    expect(b.placed.every((p) => p.status === "PLANNED")).toBe(true);
+  });
+
+  test("the per-card cap counts the picks: three copies go, the fourth waits for an outbid", async () => {
+    const KEY = "pikachu|base|58";
+    const copies = Array.from({ length: 4 }, (_, i) => lot({ listingId: `copy-${i}`, maxHammerCents: 1_000, maxAllInCents: 1_200, currentBidCents: 500, cardKey: KEY }));
+    const b = new BidBook(null, { budgetCents: 100_000, live: false, log: () => {}, caps: { perCard: 3 } });
+    await b.fire(copies, { concurrency: 8 });
+    expect(b.placed.map((p) => p.listingId)).toEqual(["copy-0", "copy-1", "copy-2"]);
+    expect(b.waiting(copies)).toBe(1);
+
+    b.placed[0].status = "OUTBID";
+    await b.fill(copies);
+    expect(b.placed.map((p) => p.listingId)).toEqual(["copy-0", "copy-1", "copy-2", "copy-3"]);
+  });
+
+  test("live: several bids in the air at once, none read back, every one held as pending", async () => {
+    let inFlight = 0;
+    let mostInFlight = 0;
+    let quotes = 0;
+    const exchange = {
+      steps: FANATICS_STEPS,
+      listingUrl: (id: string) => id,
+      quote: async (id: string) => { quotes++; return quoteFor(id); },
+      accountBids: async () => new Map(),
+      readAuction: async () => null,
+      sendBid: async () => {
+        inFlight++;
+        mostInFlight = Math.max(mostInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return { ok: true as const, bidId: "x" };
+      },
+    };
+    const rows = pool(20);
+    const b = new BidBook(exchange, { budgetCents: 1_000_000, live: true, log: () => {} });
+    const shot = await b.fire(rows, { concurrency: 8 });
+    expect(shot.placed).toBe(20);
+    expect(mostInFlight).toBeGreaterThan(1);
+    expect(mostInFlight).toBeLessThanOrEqual(8);
+    // One quote per lot before the bid, and not one after it.
+    expect(quotes).toBe(20);
+    expect(b.placed.every((p) => p.status === "PENDING")).toBe(true);
+    expect(b.committed()).toBe(20 * 1_200);
+  });
+
+  test("a lot the quote shows past the max is passed; one the house refuses in the rush is left for the next round", async () => {
+    let calls = 0;
+    const exchange = {
+      steps: FANATICS_STEPS,
+      listingUrl: (id: string) => id,
+      quote: async (id: string) => {
+        const q = quoteFor(id);
+        // lot-0 has been bid to $10 already: the next rung is past our $10 max.
+        return id === "lot-0" ? { ...q, currentBidCents: 1_000, bidCount: 3 } : q;
+      },
+      accountBids: async () => new Map(),
+      readAuction: async () => null,
+      sendBid: async (row: Biddable) => {
+        calls++;
+        return row.listingId === "lot-1"
+          ? { ok: false as const, error: "You were immediately outbid" }
+          : { ok: true as const, bidId: "x" };
+      },
+    };
+    const rows = pool(3);
+    const b = new BidBook(exchange, { budgetCents: 1_000_000, live: true, log: () => {} });
+    const shot = await b.fire(rows, { concurrency: 8 });
+    expect(shot.placed).toBe(1);
+    expect(b.placed.map((p) => p.listingId)).toEqual(["lot-2"]);
+    expect(b.skipped.map((s) => s.listingId)).toEqual(["lot-0"]);
+    // lot-1 is neither settled nor skipped: fill() quotes it again.
+    expect(b.settled.has("lot-1")).toBe(false);
+    expect(calls).toBe(2);
+    await b.fill(rows);
+    expect(calls).toBe(3);
+  });
+
+  test("a closed auction stops the fire", async () => {
+    const exchange = {
+      steps: FANATICS_STEPS,
+      listingUrl: (id: string) => id,
+      quote: async (id: string) => ({ ...quoteFor(id), auctionStatus: "CLOSED" }),
+      accountBids: async () => new Map(),
+      readAuction: async () => null,
+      sendBid: async () => ({ ok: true as const, bidId: "x" }),
+    };
+    const b = new BidBook(exchange, { budgetCents: 1_000_000, live: true, log: () => {} });
+    const shot = await b.fire(pool(5), { concurrency: 1 });
+    expect(shot.auctionClosed).toBe(true);
+    expect(shot.placed).toBe(0);
+  });
+
+  test("every bid refused for the account's reasons, none taken: the run stops once the pass is over", async () => {
+    const exchange = {
+      steps: FANATICS_STEPS,
+      listingUrl: (id: string) => id,
+      quote: async (id: string) => quoteFor(id),
+      accountBids: async () => new Map(),
+      readAuction: async () => null,
+      sendBid: async () => ({ ok: false as const, error: "no payment method on file" }),
+    };
+    const b = new BidBook(exchange, { budgetCents: 1_000_000, live: true, log: () => {} });
+    await expect(b.fire(pool(8), { concurrency: 4 })).rejects.toThrow(/read as the account/);
   });
 });

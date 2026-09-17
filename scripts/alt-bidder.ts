@@ -387,6 +387,8 @@ function jwtExpiresAt(token: string): number {
 export class AltSession implements Session {
   readonly steps = ALT_STEPS;
   private clock: { at: number; cycles: Cycle[]; live: { id: number; extended: boolean; windowSeconds: number } | null } | null = null;
+  /** A cycle's advertised close never changes, so each is asked for once. */
+  private readonly scheduledEnds = new Map<string, number>();
 
   constructor(readonly context: BrowserContext, readonly page: Page) {}
 
@@ -547,10 +549,32 @@ export class AltSession implements Session {
       id: String(mine.id),
       name: mine.name ?? `cycle ${mine.id}`,
       status: cycleStatus(mine, extended, nowS),
+      // expiresAt is the whole auction's end and moves out a window at a time
+      // once extended bidding is under way; the advertised close does not.
       endsAtUnixS: unixS(mine.expiresAt),
+      scheduledEndUnixS: await this.scheduledEnd(mine.id, unixS(mine.expiresAt)),
       windowEndsAtUnixS: extended && window > 0 ? unixS(mine.expiresAt) : 0,
       windowOrdinal: null,
+      windowSeconds: window,
     };
+  }
+
+  /**
+   * When a cycle was advertised to close — 9 PM ET on its Thursday. The list
+   * of cycles carries only the moving end, and before extended bidding that
+   * reads five minutes past the advertised close; the cycle's own record has
+   * the original. Falls back to what was passed in when Alt will not say.
+   */
+  private async scheduledEnd(cycleId: number, fallbackUnixS: number): Promise<number> {
+    const key = String(cycleId);
+    const known = this.scheduledEnds.get(key);
+    if (known !== undefined) return known;
+    const data = await this.gql<{ auctionCycle: { originalExpiresAt: string | null } | null }>(
+      "AuctionCycle", `query AuctionCycle { auctionCycle(id: ${Number(cycleId)}) { id originalExpiresAt } }`, {}, { auth: false })
+      .catch(() => null);
+    const at = unixS(data?.auctionCycle?.originalExpiresAt) || fallbackUnixS;
+    if (at > 0) this.scheduledEnds.set(key, at);
+    return at;
   }
 
   /** Every open bid on the account, in one request. */

@@ -13,6 +13,14 @@
  * left alone: their lots cannot be bid past their opening price for another
  * week, and the comps behind a max bid go stale long before then.
  *
+ * The close. Extended bidding opens at 7:00 PM PT and Fanatics closes lots
+ * one by one: a lot with no bid between 7:00 and 7:30 closes at 7:30 sharp,
+ * one still open after 7:30 closes five minutes after its last bid, and after
+ * 8:00 one minute after. The bids go on at 7:27 — the "fire after" box, 27
+ * minutes past the open — so the quiet lots close three minutes later with
+ * our max on them and the fought-over ones give the other bidder five
+ * minutes rather than an evening. See scripts/sniper-core.ts for the hold.
+ *
  * Usage:
  *   npm run sniper                          plan a $100 budget, no account needed, nothing sent
  *   npm run sniper -- --budget=250          plan a bigger one
@@ -138,7 +146,7 @@ export class AlgoliaKey {
   /** The harvest in flight, so queries running side by side share one page load. */
   private harvesting: Promise<string> | null = null;
 
-  constructor(private readonly browser: Browser) {}
+  constructor(private readonly browser: Browser, private readonly quiet = false) {}
 
   async get(): Promise<string> {
     const now = Date.now() / 1000;
@@ -175,7 +183,7 @@ export class AlgoliaKey {
     const validUntil = Number(/validUntil=(\d+)/.exec(decoded)?.[1] ?? 0);
     this.key = key;
     this.validUntil = validUntil || now + 300;
-    console.log(`    search key harvested, valid ${Math.round(this.validUntil - now)}s`);
+    if (!this.quiet) console.log(`    search key harvested, valid ${Math.round(this.validUntil - now)}s`);
     return key;
   }
 }
@@ -323,7 +331,8 @@ const fmtPacific = (unixS: number) => fmtLocal(unixS, TIME_ZONE, "PT");
  * collected separately so that most cells fit one query and the rest need at
  * most one split.
  */
-async function scanFanatics(keyer: AlgoliaKey, now: Date): Promise<Hit[]> {
+async function scanFanatics(keyer: AlgoliaKey, now: Date, quiet = false): Promise<Hit[]> {
+  const say = quiet ? () => {} : (line: string) => console.log(line);
   const base = [
     `marketplace:WEEKLY`,
     `status:Live`,
@@ -349,9 +358,9 @@ async function scanFanatics(keyer: AlgoliaKey, now: Date): Promise<Hit[]> {
   const ends = soon.length > 0 ? soon : [open[0]];
   const skipped = open.filter((t) => !ends.includes(t));
 
-  console.log(`    ${ends.length} auction(s) closing within ${AUCTION_WINDOW_DAYS} days: ${ends.map((t) => fmtPacific(t)).join(", ")}`);
+  say(`    ${ends.length} auction(s) closing within ${AUCTION_WINDOW_DAYS} days: ${ends.map((t) => fmtPacific(t)).join(", ")}`);
   if (skipped.length > 0) {
-    console.log(`    skipping ${skipped.length} later auction(s): ${skipped.map((t) => fmtPacific(t)).join(", ")}`);
+    say(`    skipping ${skipped.length} later auction(s): ${skipped.map((t) => fmtPacific(t)).join(", ")}`);
   }
 
   const hits: Hit[] = [];
@@ -366,7 +375,7 @@ async function scanFanatics(keyer: AlgoliaKey, now: Date): Promise<Hit[]> {
     }
     const collected = await parallel(cells, SCAN_CONCURRENCY, (filters) => collect(keyer, filters));
     for (const part of collected) hits.push(...part);
-    console.log(`    ${fmtPacific(end)}: ${hits.length} lot(s) so far`);
+    say(`    ${fmtPacific(end)}: ${hits.length} lot(s) so far`);
   }
   return hits;
 }
@@ -402,13 +411,18 @@ export const fanatics: Venue = {
   sessionDir: SESSION_DIR,
   steps: FANATICS_STEPS,
   chaseList: true,
+  // Lots close one by one here — a lot nobody bids on between 7:00 and 7:30
+  // PM PT closes at 7:30 sharp — so the bids go on at 7:27, three minutes
+  // before that cliff, and the whole auction never ends as one.
+  closesTogether: false,
+  fireAfterMinutes: 27,
   listingUrl,
 
-  async scan({ headed, now }) {
+  async scan({ headed, now, light }) {
     const browser = await chromium.launch({ headless: !headed });
     let hits: Hit[];
     try {
-      hits = await scanFanatics(new AlgoliaKey(browser), now);
+      hits = await scanFanatics(new AlgoliaKey(browser, light ?? false), now, light ?? false);
     } finally {
       await browser.close();
     }

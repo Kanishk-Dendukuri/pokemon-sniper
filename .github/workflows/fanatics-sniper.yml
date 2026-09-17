@@ -1,16 +1,29 @@
-# Fanatics Collect sniper: find the lots worth bidding on and bid on them.
+# Fanatics Collect sniper: find the lots worth bidding on, and bid on them all
+# at once, three minutes before the quiet ones close.
 #
 # One pipeline. It walks the Pokémon lots in the Weekly Auction about to close
 # — later auctions are left alone — prices them by cert through Card Uploader a
-# batch at a time, and puts each batch's worthy lots in front of a budget. The
-# pricing carries on until every lot on the chase list has a max bid, with the
-# bids watched between batches; from then on the run polls the bids it holds
-# and spends what an outbid lot frees on the next lot down. Start it four or
-# five hours before the close. See scripts/sniper-core.ts for the chase list, the tier table and
-# the sales-history rule, scripts/sniper-book.ts for the budget and the guard
-# that keeps every bid at or under the lot's max, and scripts/fanatics-sniper.ts
-# and scripts/fanatics-bidder.ts for the scan, the session and the bid ladder.
-# The same pipeline runs at Alt: alt-sniper.yml.
+# batch at a time, and holds: nothing is bid while the list is priced. A bid
+# placed hours early is one the other bidder has hours to answer (13 Sep: 433
+# bids from 4 PM, 189 beaten by someone coming back later, 28 won). From half
+# an hour before the fire the run re-scans the auction every five minutes and
+# notes which lots the room has already taken past our max; at the fire it
+# quotes the rest and bids on all of it, eight lots at a time. Then it watches
+# the bids it holds until the auction is over.
+#
+# The fire is the "fire after" box: minutes after extended bidding opens at
+# 7:00 PM PT, 27 by default, so 7:27. Fanatics closes lots one by one — a lot
+# nobody bids on between 7:00 and 7:30 closes at 7:30 sharp; after that a lot
+# closes five minutes after its last bid, and after 8:00 one minute after —
+# so 7:27 puts our max on the quiet lots three minutes before they close, and
+# gives the other bidder on a fought-over lot the five-minute window that
+# follows rather than an evening.
+#
+# See scripts/sniper-core.ts for the chase list, the tier table, the
+# sales-history rule and the hold, scripts/sniper-book.ts for the ceiling, the
+# fire and the guard that keeps every bid at or under the lot's max, and
+# scripts/fanatics-sniper.ts and scripts/fanatics-bidder.ts for the scan, the
+# session and the bid ladder. The same pipeline runs at Alt: alt-sniper.yml.
 #
 # The tier table — what to bid on a card by what it is worth — is typed into
 # the run, one line per grader, in dollars of the card's lowest recent sale:
@@ -20,6 +33,10 @@
 # bid. The boxes' defaults are the code's own (DEFAULT_TIERS); the sold-report
 # workflow is where a new line is tried against past auctions before it goes
 # here. A line that cannot be read stops the run before anything is scanned.
+#
+# The budget box is a ceiling, not a target: the most the run may hold at once,
+# all-in. The bids go on down the list, best lot first, as far as it reaches.
+# How many lots are won is the tier table's and the per-card cap's doing.
 #
 # Nothing is bid unless the "live" box is ticked. Unticked, the run does
 # everything except send a bid, and needs no Fanatics account at all.
@@ -36,18 +53,18 @@
 # fanatics-bids.csv; the Actions log is the record of every bid, and the run
 # summary is the page.
 #
-# There is no schedule: every run is started by hand. Sunday morning Pacific
-# is the moment to fire it, while every lot in that evening's extended bidding
-# is still open and the prices are hours old rather than days.
+# There is no schedule: every run is started by hand. Start it around 4 PM PT
+# on the Sunday: pricing the chase list takes about an hour, the bids go on at
+# 7:27, and the lots are all closed by about 8:30.
 name: Fanatics sniper
 
 on:
   workflow_dispatch:
     inputs:
       budget:
-        description: "Budget in dollars, all-in (hammer + 20% buyer's premium)"
+        description: "Ceiling on what the run may hold at once, all-in (hammer + 20% premium); not a target"
         type: string
-        default: "100"
+        default: "10000"
       live:
         description: "Place real bids (unticked: log only, nothing sent)"
         type: boolean
@@ -68,6 +85,10 @@ on:
         description: "Most lots of one card to hold at once, counted across every grade and both graders"
         type: string
         default: "4"
+      fire_after_minutes:
+        description: "Minutes after extended bidding opens (7:00 PM PT) to put the bids on"
+        type: string
+        default: "27"
       token:
         description: "Fanatics session token (blank: the FANATICS_REFRESH_TOKEN secret)"
         type: string
@@ -129,12 +150,13 @@ jobs:
       - if: steps.playwright.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
 
-      # Left alone, the dispatch form's own defaults stand: a $100 plan, no
+      # Left alone, the dispatch form's own defaults stand: a plan under a
+      # $10,000 ceiling, no
       # bids sent, no Fanatics account touched.
       - name: Scan, price and bid
         run: >-
           npm run sniper --
-          --budget=${{ inputs.budget || '100' }}
+          --budget=${{ inputs.budget || '10000' }}
           ${{ inputs.live && '--live' || '' }}
           ${{ inputs.count_existing_bids && '--count-existing-bids' || '' }}
         env:
@@ -157,6 +179,9 @@ jobs:
           TIERS_CGC: ${{ inputs.cgc_tiers }}
           # The per-card cap, the same way. Blank means the code's own default.
           MAX_COPIES_PER_CARD: ${{ inputs.max_copies_per_card }}
+          # When the bids go on, in minutes after extended bidding opens.
+          # Blank means the venue's own default.
+          FIRE_AFTER_MINUTES: ${{ inputs.fire_after_minutes }}
 
       - name: Publish summary
         if: always()

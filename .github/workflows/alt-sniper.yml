@@ -1,13 +1,25 @@
 # Alt sniper: find the lots worth bidding on in the Alt Auction about to close,
-# and bid on them.
+# and bid on them all at once, late in the night.
 #
 # The same pipeline as fanatics-sniper.yml, at alt.xyz: see
-# scripts/sniper-core.ts for the tier table and the sales-history rule,
-# scripts/alt-sniper.ts for the scan, and scripts/alt-bidder.ts for the
+# scripts/sniper-core.ts for the tier table, the sales-history rule and the
+# hold, scripts/alt-sniper.ts for the scan, and scripts/alt-bidder.ts for the
 # session and the bid ladder. One difference from Fanatics: there is no chase
 # list here. An Alt Auction holds a thousand or so PSA/CGC 7–10 Pokémon lots
 # and every one of them is a candidate; the sales rule and the tier table
 # decide the rest.
+#
+# The fire is the "fire after" box: minutes after extended bidding opens at
+# 9:00 PM ET, 100 by default, so 10:40 PM. Alt extends the whole auction
+# together — any bid on any lot pushes every lot's close out by the window of
+# the hour (two minutes until 9:30, one until 10:00, 30 seconds until 10:30,
+# 15 from then on), and it ends the moment a window passes with no bid
+# anywhere. Nothing closes early, and the night runs long: the 26 auctions to
+# 10 Sep 2026 ended between 12:03 and 2:30 AM, bar one holiday-week Friday at
+# 10:45 PM. So the later the bids go on, the less of the night an outbid
+# bidder has to answer in; 10:40 is late with the auction still safely open.
+# Should the auction's clock read seconds from its end before then, the run
+# fires at once rather than hold through the close.
 #
 # The tier table — what to bid on a card by what it is worth — is typed into
 # the run, one line per grader, in dollars of the card's lowest recent sale:
@@ -17,6 +29,10 @@
 # bid. The boxes' defaults are the code's own (DEFAULT_TIERS); the sold-report
 # workflow is where a new line is tried against past auctions before it goes
 # here. A line that cannot be read stops the run before anything is scanned.
+#
+# The budget box is a ceiling, not a target: the most the run may hold at once,
+# all-in. The bids go on down the list, best lot first, as far as it reaches.
+# How many lots are won is the tier table's and the per-card cap's doing.
 #
 # Nothing is bid unless the "live" box is ticked. Unticked, the run does
 # everything except send a bid and needs no Alt account at all. The bid
@@ -37,18 +53,20 @@
 # alt-bids.csv; the Actions log is the record of every bid, and the run
 # summary is the page.
 #
-# There is no schedule: every run is started by hand. Alt Auctions close every
-# Thursday, with extended bidding from 9 PM ET, so the Thursday morning Eastern
-# is the moment to fire it — the prices are then hours old rather than days.
+# There is no schedule: every run is started by hand. Start it around 8:30 PM
+# ET on the Thursday: pricing takes a quarter of an hour, the bids go on at
+# 10:40, and the six-hour cap then reaches 2:30 AM, past every end but one
+# since March. A run cut off at the cap leaves its bids standing; only the
+# tally is lost.
 name: Alt sniper
 
 on:
   workflow_dispatch:
     inputs:
       budget:
-        description: "Budget in dollars, all-in (hammer + 20% buyer's premium)"
+        description: "Ceiling on what the run may hold at once, all-in (hammer + 20% premium); not a target"
         type: string
-        default: "100"
+        default: "10000"
       live:
         description: "Place real bids (unticked: log only, nothing sent)"
         type: boolean
@@ -69,6 +87,10 @@ on:
         description: "Most lots of one card to hold at once, counted across every grade and both graders"
         type: string
         default: "4"
+      fire_after_minutes:
+        description: "Minutes after extended bidding opens (9:00 PM ET) to put the bids on (or sooner, the moment the auction reads seconds from its end)"
+        type: string
+        default: "100"
       token:
         description: "Alt session token (blank: the ALT_SESSION_TOKEN secret)"
         type: string
@@ -130,12 +152,13 @@ jobs:
       - if: steps.playwright.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
 
-      # Left alone, the dispatch form's own defaults stand: a $100 plan, no
+      # Left alone, the dispatch form's own defaults stand: a plan under a
+      # $10,000 ceiling, no
       # bids sent, no Alt account touched.
       - name: Scan, price and bid
         run: >-
           npm run sniper:alt --
-          --budget=${{ inputs.budget || '100' }}
+          --budget=${{ inputs.budget || '10000' }}
           ${{ inputs.live && '--live' || '' }}
           ${{ inputs.count_existing_bids && '--count-existing-bids' || '' }}
         env:
@@ -153,6 +176,9 @@ jobs:
           TIERS_CGC: ${{ inputs.cgc_tiers }}
           # The per-card cap, the same way. Blank means the code's own default.
           MAX_COPIES_PER_CARD: ${{ inputs.max_copies_per_card }}
+          # When the bids go on, in minutes after extended bidding opens.
+          # Blank means the venue's own default.
+          FIRE_AFTER_MINUTES: ${{ inputs.fire_after_minutes }}
 
       - name: Publish summary
         if: always()

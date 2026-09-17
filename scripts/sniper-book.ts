@@ -15,9 +15,12 @@
  * that has this account's max on it is never bid again: outbid means someone
  * went past the max, and past the max is not somewhere this goes.
  *
- * Budget is the all-in cost — hammer plus the buyer's premium — of the bids
- * this run has placed and is still winning. An outbid lot releases its share;
- * a won lot keeps it.
+ * Budget is a ceiling, not a target: the all-in cost — hammer plus the
+ * buyer's premium — of the bids this run has placed and is still winning may
+ * never add up to more than it. An outbid lot releases its share; a won lot
+ * keeps it. The bids go on all together at the fire (fire()), best lot first,
+ * as far down the list as the ceiling reaches; how many lots are won is the
+ * tier table's and the per-card cap's business, not the budget's.
  *
  * Bids that were on the account before the run started are not part of it.
  * They are left exactly as they are — the run never bids on those lots again
@@ -28,7 +31,13 @@
 /** Both houses: "A 20% buyer's premium is added to the hammer price of all sales." */
 export const BUYERS_PREMIUM = 0.20;
 
-export const DEFAULT_BUDGET_DOLLARS = 100;
+/**
+ * The ceiling a run holds its bids under when told nothing else. High on
+ * purpose: nearly every bid is outbid and the ceiling only ever matters if a
+ * table is mistyped, so a low one would cut the list off for no gain. What a
+ * run may actually end up paying is the tier table's doing.
+ */
+export const DEFAULT_BUDGET_DOLLARS = 10_000;
 
 /**
  * A bid the site turned down — too low by the time it landed, say — is quoted
@@ -283,10 +292,24 @@ export type AuctionState = {
   name: string;
   /** PREVIEW, LIVE, EXTENDED_BIDDING or CLOSED. */
   status: string;
+  /**
+   * When the house says the auction ends. At a house that extends the whole
+   * auction together (Alt) this moves out with every bid once extended bidding
+   * is under way; at one whose lots close one by one (Fanatics) it is the fixed
+   * moment extended bidding opened.
+   */
   endsAtUnixS: number;
+  /**
+   * When extended bidding was scheduled to open — the close the house
+   * advertised. Fixed for the life of the auction, so the fire time is
+   * counted from it.
+   */
+  scheduledEndUnixS: number;
   /** When the open extended-bidding window shuts, if one is open. */
   windowEndsAtUnixS: number;
   windowOrdinal: number | null;
+  /** How long the current extension window is, in seconds; 0 when the house has not said. */
+  windowSeconds: number;
 };
 
 /**
@@ -743,6 +766,154 @@ export class BidBook {
         console.warn(`    ⚠️  ${row.lot}: could not read the bid back (${err instanceof Error ? err.message : err}); next poll will`);
       }
     }
+  }
+
+  /**
+   * Puts the bids on all at once — the fire.
+   *
+   * fill() is the patient walk: one lot, one quote, one bid, read it back,
+   * next. That is the wrong shape for the moment the bids have to go on,
+   * which at Fanatics is the three minutes before the quiet lots close and at
+   * Alt is whenever the whole auction might go a window without a bid. So
+   * this picks everything the ceiling and the caps allow in one pass, best
+   * lot first — counting each pick as a live copy of its card, exactly as
+   * fill() would have one bid at a time — and then quotes and bids the picks
+   * `concurrency` at a time. Nothing is read back: the next poll settles every
+   * one of them off the account in one request, and a bid is held as PENDING
+   * (in the budget, counted by the cap) until then.
+   *
+   * A lot the house turns down for its own reason — outbid in the moment it
+   * took to send — is left for fill() to quote again on a later round, as
+   * before. Refusals that read as the account are counted the same way as
+   * in fill(), and stop the run the same way once the pass is over: there is
+   * nothing down the list for a broken account, however fast it is walked.
+   */
+  async fire(pool: Biddable[], opts: { concurrency: number }): Promise<{ picked: number; placed: number; exposureCents: number; auctionClosed: boolean }> {
+    const caps = this.opts.caps;
+    const byCard = new Map<string, number>();
+    for (const p of this.placed) {
+      if (!p.cardKey || p.status === "OUTBID" || (p.closed && p.status !== "HIGH_BID")) continue;
+      byCard.set(p.cardKey, (byCard.get(p.cardKey) ?? 0) + 1);
+    }
+    const picked: Biddable[] = [];
+    let free = this.free();
+    let exposureCents = 0;
+    for (const row of pool) {
+      if (this.settled.has(row.listingId)) continue;
+      const ours = this.opts.steps.below(row.maxHammerCents);
+      if (ours <= 0) continue;
+      const allIn = allInCents(ours);
+      // The ceiling: a lot it does not reach is skipped, and a cheaper one
+      // further down may still fit, so this is a skip rather than a stop.
+      if (allIn > free) continue;
+      if (row.cardKey && caps && (byCard.get(row.cardKey) ?? 0) >= caps.perCard) continue;
+      picked.push(row);
+      free -= allIn;
+      exposureCents += allIn;
+      if (row.cardKey) byCard.set(row.cardKey, (byCard.get(row.cardKey) ?? 0) + 1);
+    }
+    this.opts.log("fire", { picked: picked.length, exposureCents, ceilingCents: this.opts.budgetCents, live: this.opts.live },
+      `    firing ${picked.length} bid(s) — ${dollars(exposureCents)} all-in if every one of them won, under a ${dollars(this.opts.budgetCents)} ceiling`);
+    if (picked.length === 0) return { picked: 0, placed: 0, exposureCents, auctionClosed: false };
+
+    let placed = 0;
+    let auctionClosed = false;
+    const one = async (row: Biddable) => {
+      if (auctionClosed) return;
+      let lot: Lot;
+      if (!this.exchange) {
+        lot = snapshotLot(row);
+      } else {
+        try {
+          lot = await this.exchange.quote(row.listingId);
+        } catch (err) {
+          console.warn(`    ⚠️  ${row.lot}: could not read the lot (${err instanceof Error ? err.message : err}); next round`);
+          return;
+        }
+      }
+      if (lot.auctionId) this.auctionId = lot.auctionId;
+      if (lot.auctionStatus === "CLOSED") { this.pass(row, "the auction has closed"); auctionClosed = true; return; }
+      if (lot.isClosed) { this.pass(row, "the lot has closed"); return; }
+      if (lot.isOwner) { this.pass(row, "this account is the seller"); return; }
+      if (lot.userMaxBidCents > 0) {
+        this.settled.add(row.listingId);
+        this.inherited.push({
+          listingId: row.listingId, title: row.title, lot: row.lot, cents: lot.userMaxBidCents, allInCents: allInCents(lot.userMaxBidCents),
+          status: lot.userBidStatus === "NO_STATUS" && lot.highestBidder ? "HIGH_BID" : lot.userBidStatus, closed: lot.isClosed,
+          at: new Date().toISOString(), currentBidCents: lot.currentBidCents,
+        });
+        this.opts.log("already-bid", { listingId: row.listingId, url: this.url(row.listingId), cents: lot.userMaxBidCents, status: lot.userBidStatus },
+          `    =  ${row.lot}: already carries this account's max of ${dollars(lot.userMaxBidCents)} (${lot.userBidStatus}) — left alone\n       ${this.url(row.listingId)}`);
+        return;
+      }
+      if (!lot.userCanBuy) {
+        this.pass(row, "the site says this account cannot bid on it (no payment method on file, or the profile is incomplete)");
+        this.cannotBuy++;
+        return;
+      }
+
+      const amount = bidAmount(row, lot, this.opts.steps);
+      if ("skip" in amount) { this.pass(row, amount.skip); return; }
+      const cents = withinMax(amount.cents, row);
+      const allIn = allInCents(cents);
+
+      if (!this.opts.live) {
+        this.settled.add(row.listingId);
+        placed++;
+        this.placed.push({ listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PLANNED", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey });
+        this.opts.log("would-bid", { listingId: row.listingId, url: this.url(row.listingId), cents, allIn, currentBid: lot.currentBidCents },
+          `    ○  would bid ${dollars(cents)} (${dollars(allIn)} all-in) on ${row.lot} — current ${dollars(lot.currentBidCents)}, ${lot.bidCount} bid(s) — ${row.title}\n       ${this.url(row.listingId)}`);
+        return;
+      }
+
+      // Live. The request is the one irreversible thing in this file.
+      const pending: PlacedBid = { listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PENDING", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey };
+      let result: BidResult;
+      try {
+        result = await this.exchange!.sendBid(row, cents);
+      } catch (err) {
+        this.settled.add(row.listingId);
+        this.placed.push(pending);
+        this.opts.log("bid-unknown", { listingId: row.listingId, url: this.url(row.listingId), cents, error: err instanceof Error ? err.message : String(err) },
+          `    ⚠️  ${row.lot}: the bid request failed (${err instanceof Error ? err.message : err}); holding ${dollars(allIn)} until the account says\n       ${this.url(row.listingId)}`);
+        return;
+      }
+      if (!result.ok) {
+        const n = (this.attempts.get(row.listingId) ?? 0) + 1;
+        this.attempts.set(row.listingId, n);
+        const blame = result.blame ?? blameOf(result.error);
+        this.opts.log("refused", { listingId: row.listingId, url: this.url(row.listingId), cents, attempt: n, error: result.error, blame });
+        if (n >= BID_ATTEMPTS) this.pass(row, `the site refused the bid ${n} times, last: ${result.error}`);
+        else console.log(`    ✖  ${row.lot}: the site refused ${dollars(cents)} (${result.error}); will quote again next round`);
+        if (blame === "lot") this.refusals = 0; else this.refusals++;
+        return;
+      }
+      this.refusals = 0;
+      this.taken++;
+      this.settled.add(row.listingId);
+      placed++;
+      this.placed.push(pending);
+      this.opts.log("bid", { listingId: row.listingId, url: this.url(row.listingId), cents, allIn, bidId: result.bidId, currentBid: lot.currentBidCents },
+        `    ●  bid ${dollars(cents)} (${dollars(allIn)} all-in) on ${row.lot} — current was ${dollars(lot.currentBidCents)} — ${row.title}\n       ${this.url(row.listingId)}`);
+    };
+
+    // `concurrency` lots in flight, each worker taking the next off the list.
+    let next = 0;
+    const worker = async () => {
+      for (let i = next++; i < picked.length; i = next++) await one(picked[i]);
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(opts.concurrency, picked.length)) }, worker));
+
+    // The account-wide stops, applied once the pass is over rather than
+    // mid-flight: with several bids in the air the count can pass the limit by
+    // a few, and stopping is about the account, not the exact count.
+    if (this.taken === 0 && this.cannotBuy >= CANNOT_BUY_LIMIT) {
+      throw new Error(`${this.cannotBuy} lots that this account is not allowed to bid on — check the payment method and profile on the site before running again.`);
+    }
+    if (this.taken === 0 && this.refusals >= REFUSAL_LIMIT) {
+      throw new Error(`${this.refusals} bids were refused for reasons that read as the account. Check the payment method, holds and bidding limits on the site.`);
+    }
+    return { picked: picked.length, placed, exposureCents, auctionClosed };
   }
 
   /**

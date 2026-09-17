@@ -1,8 +1,14 @@
 import { describe, expect, test } from "vitest";
 import type { Row } from "@/scripts/fanatics-sniper";
+import { FANATICS_STEPS } from "@/scripts/fanatics-bidder";
+import { ALT_STEPS } from "@/scripts/alt-bidder";
 import {
   BUYERS_PREMIUM,
   cardCaps,
+  fireAfterFromArgs,
+  fireAtUnixS,
+  pricedOut,
+  timeToFire,
   CSV_COLUMNS,
   DEFAULT_TIERS,
   DEFAULT_MAX_COPIES_PER_CARD,
@@ -561,5 +567,57 @@ describe("the last cut before the bid list", () => {
     );
     expect(out.worthy).toHaveLength(copies);
     expect(out.flaggedOut).toBe(1);
+  });
+});
+
+/**
+ * The fire: when the bids go on, and what a re-scan says about a lot.
+ */
+describe("the fire", () => {
+  test("fire-after: the venue's own unless told, the environment when told, and only a number of minutes", () => {
+    expect(fireAfterFromArgs(27, {})).toBe(27);
+    expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: " 100 " })).toBe(100);
+    expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "0" })).toBe(0);
+    expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "2.5" })).toBe(2.5);
+    expect(() => fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "-1" })).toThrow(/minutes/);
+    expect(() => fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "late" })).toThrow(/minutes/);
+  });
+
+  test("the fire is so many minutes after extended bidding was scheduled to open", () => {
+    const sevenPm = 1_757_811_600;  // 2026-09-14T02:00:00Z, Sunday 7 PM PT
+    expect(fireAtUnixS(sevenPm, 27)).toBe(sevenPm + 27 * 60);
+    expect(fireAtUnixS(sevenPm, 0)).toBe(sevenPm);
+  });
+
+  test("at the fire time, yes; before it, no — unless the whole auction is about to end", () => {
+    const fireAt = 1_000_000;
+    const before = { nowUnixS: fireAt - 600, fireAtUnixS: fireAt };
+    expect(timeToFire({ ...before, closesTogether: false, auction: null })).toEqual({ fire: false });
+    expect(timeToFire({ nowUnixS: fireAt, fireAtUnixS: fireAt, closesTogether: false, auction: null })).toMatchObject({ fire: true, why: "the fire time" });
+    expect(timeToFire({ nowUnixS: fireAt + 5, fireAtUnixS: fireAt, closesTogether: true, auction: null })).toMatchObject({ fire: true });
+
+    // Alt, extended bidding on, the clock reading six seconds from the end: now.
+    const ending = { status: "EXTENDED_BIDDING", endsAtUnixS: before.nowUnixS + 6 };
+    expect(timeToFire({ ...before, closesTogether: true, auction: ending })).toMatchObject({ fire: true, why: expect.stringContaining("6s from the end") });
+    // The same clock at a house whose lots close one by one says nothing about the whole.
+    expect(timeToFire({ ...before, closesTogether: false, auction: ending })).toEqual({ fire: false });
+    // Not yet in extended bidding: the end it reads is the scheduled open, and nothing ends there.
+    expect(timeToFire({ ...before, closesTogether: true, auction: { status: "LIVE", endsAtUnixS: before.nowUnixS + 6 } })).toEqual({ fire: false });
+    // Comfortably far from the end.
+    expect(timeToFire({ ...before, closesTogether: true, auction: { status: "EXTENDED_BIDDING", endsAtUnixS: before.nowUnixS + 14 } })).toEqual({ fire: false });
+    // A clock the house has not given.
+    expect(timeToFire({ ...before, closesTogether: true, auction: { status: "EXTENDED_BIDDING", endsAtUnixS: 0 } })).toEqual({ fire: false });
+  });
+
+  test("a re-scan's snapshot says whether the least next bid is already past the max", () => {
+    const row = { maxHammerCents: 4_000 };
+    // Fanatics: rungs. Standing at $39 the next rung is $40, still ours; at $40 the next is $41, not.
+    expect(pricedOut(row, { currentBidCents: 3_900, bidCount: 4 }, FANATICS_STEPS)).toBeNull();
+    expect(pricedOut(row, { currentBidCents: 4_000, bidCount: 5 }, FANATICS_STEPS)).toMatch(/\$41/);
+    // Alt: standing bid plus the increment. $39 wants $40 next; $40 wants $41.
+    expect(pricedOut(row, { currentBidCents: 3_900, bidCount: 4 }, ALT_STEPS)).toBeNull();
+    expect(pricedOut(row, { currentBidCents: 4_000, bidCount: 5 }, ALT_STEPS)).not.toBeNull();
+    // No bids yet: the snapshot has no starting price, so the lot is kept.
+    expect(pricedOut(row, { currentBidCents: 4_500, bidCount: 0 }, FANATICS_STEPS)).toBeNull();
   });
 });
