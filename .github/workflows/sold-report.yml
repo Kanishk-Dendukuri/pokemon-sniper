@@ -1,0 +1,156 @@
+# Sold report: what every sold lot went for, and what the snipers' tier
+# tables should therefore be.
+#
+# It walks the most recent closed auctions at Fanatics Collect and at Alt,
+# keeps the lots the sniper would have priced (the same candidates, block
+# list, graders, grades and sales-history rule as fanatics-sniper.yml and
+# alt-sniper.yml: the chase list at Fanatics, every lot at Alt), prices each
+# through Card Uploader the way the sniper does, and then — for every band of
+# a fixed price grid and every share from 50% to 100% — works out what that
+# share would have won, what it would have cost, what those cards resell for
+# and therefore what it would have made. The share that made the most wins
+# the band, neighbours that agree are merged, and the answer comes out as a
+# tier line ready to paste into a sniper's box.
+#
+# The price grid is fixed and has nothing to do with any table, so the report
+# can say a boundary is in the wrong place rather than only answering inside
+# the bands it was handed. The tier boxes below are the table to COMPARE
+# against: every band also gets an "as configured" row, so current and best
+# sit side by side. They gate nothing.
+#
+# The budget box matters. Without one the recommendation is the table that
+# makes the most money, which over the four auctions to 2026-09-11 wanted
+# $10,700 an auction at Fanatics. With one, the rules are chosen together —
+# one per band, across both graders, spend summed against the budget — so
+# what comes back is the best table that budget can actually pay for, which
+# is a different and much stingier table.
+#
+# The resale rates are the one thing the report cannot work out for itself,
+# and every profit and every recommendation follows from them — rates that
+# are wrong here recommend the wrong table with complete confidence. They are
+# a share of market value, which is the card's five most recent sales with
+# the highest and lowest dropped and the other three averaged.
+#
+# See scripts/sold-report.ts.
+#
+# Neither house needs an account for this: both publish their sold lots.
+# Nothing is bid, nothing is bought, no Card Uploader credits are spent, and
+# nothing is written back anywhere. The snipers are untouched.
+#
+# There is no schedule: run it by hand, after a close, with as many past
+# auctions as wanted. Asking for more than exist takes what there is.
+name: Sold report
+
+on:
+  workflow_dispatch:
+    inputs:
+      fanatics_auctions:
+        description: "Closed Fanatics Weekly Auctions to look at, newest first (0: skip Fanatics)"
+        type: string
+        default: "4"
+      alt_auctions:
+        description: "Closed Alt Auctions to look at, newest first (0: skip Alt)"
+        type: string
+        default: "4"
+      psa_tiers:
+        description: "PSA tier table to judge the lots under, in dollars of the lowest recent sale: from-to: flat $N | market - $N | N%"
+        type: string
+        default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%"
+      cgc_tiers:
+        description: "CGC tier table, the same way"
+        type: string
+        default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 77%, $90-450: 70%"
+      psa_resale:
+        description: "What a PSA card resells for, net, as a share of market value, by what it is worth"
+        type: string
+        default: "$0-100: 90%, $100-500: 85%, $500+: 85%"
+      cgc_resale:
+        description: "The same for CGC"
+        type: string
+        default: "$0-100: 82%, $100-500: 75%, $500+: 75%"
+      min_margin:
+        description: "Profit on the spend a band must clear to be worth bidding in — it sets the recommended floor and ceiling"
+        type: string
+        default: "10"
+      budget:
+        description: "Budget one sniper run has at one house, all-in — the recommended table is cut to fit it (0: the best table whatever it costs)"
+        type: string
+        default: "0"
+
+# One at a time, so two runs never race each other on the same Card Uploader
+# account. It does not share the snipers' groups: this run creates no batch
+# and touches no budget, so a sniper can run alongside it.
+concurrency:
+  group: sold-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Pricing is the long part. A Fanatics Weekly Auction has some 7,000
+    # chase-list lots and an Alt Auction a thousand or so (every PSA/CGC lot),
+    # and Card Uploader answers 5–8 certs a second, so the default of four
+    # each is about an hour and every Fanatics auction beyond that is a
+    # quarter of an hour more. 360 is
+    # the ceiling GitHub-hosted runners allow, and what the snipers are given,
+    # so the run is given all of it: a report cut off mid-pricing has nothing
+    # to show for the hour it spent.
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Chromium is a 150 MB download every run without this. The cache is keyed
+      # on the lock file, so a Playwright upgrade fetches the browser it wants;
+      # the system libraries are cheap and installed either way.
+      - name: Cache Playwright's Chromium
+        id: playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - if: steps.playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Scan the closed auctions and price the lots
+        run: >-
+          npm run sold-report --
+          --fanatics=${{ inputs.fanatics_auctions || '4' }}
+          --alt=${{ inputs.alt_auctions || '4' }}
+          --min-margin=${{ inputs.min_margin || '10' }}
+          --budget=${{ inputs.budget || '0' }}
+        env:
+          # The free per-cert price lookup, the same one the snipers use.
+          CARDUPLOADER_EMAIL: ${{ secrets.CARDUPLOADER_EMAIL }}
+          CARDUPLOADER_PASSWORD: ${{ secrets.CARDUPLOADER_PASSWORD }}
+          # The tier tables, through the environment rather than the command
+          # line: the lines carry "$" and spaces, which a shell would eat.
+          TIERS_PSA: ${{ inputs.psa_tiers }}
+          TIERS_CGC: ${{ inputs.cgc_tiers }}
+          RESALE_PSA: ${{ inputs.psa_resale }}
+          RESALE_CGC: ${{ inputs.cgc_resale }}
+
+      - name: Publish summary
+        if: always()
+        run: cat sold-report-runs/*/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      # The workbook, the same sheets as CSVs, and the summary page.
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sold-report
+          path: sold-report-runs/*/
+          if-no-files-found: ignore
+          retention-days: 90

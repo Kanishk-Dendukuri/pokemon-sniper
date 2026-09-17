@@ -1,0 +1,170 @@
+# Alt sniper: find the lots worth bidding on in the Alt Auction about to close,
+# and bid on them.
+#
+# The same pipeline as fanatics-sniper.yml, at alt.xyz: see
+# scripts/sniper-core.ts for the tier table and the sales-history rule,
+# scripts/alt-sniper.ts for the scan, and scripts/alt-bidder.ts for the
+# session and the bid ladder. One difference from Fanatics: there is no chase
+# list here. An Alt Auction holds a thousand or so PSA/CGC 7–10 Pokémon lots
+# and every one of them is a candidate; the sales rule and the tier table
+# decide the rest.
+#
+# The tier table — what to bid on a card by what it is worth — is typed into
+# the run, one line per grader, in dollars of the card's lowest recent sale:
+# "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%" bids a flat
+# $5 on a card worth $7.50–8, $3 under on one worth $8–10, 85% all-in of one
+# worth $10–90 and 80% of one worth $90–450; under $7.50 and over $450 nothing is
+# bid. The boxes' defaults are the code's own (DEFAULT_TIERS); the sold-report
+# workflow is where a new line is tried against past auctions before it goes
+# here. A line that cannot be read stops the run before anything is scanned.
+#
+# Nothing is bid unless the "live" box is ticked. Unticked, the run does
+# everything except send a bid and needs no Alt account at all. The bid
+# request itself was checked against what alt.xyz sends on 2026-09-07; what
+# has never run signed in is the rest of the account side, so tick the box
+# only after a --quote-only run has proved the session and the bid read.
+#
+# A live run needs an Alt session token, pasted into the token box when the
+# run is started or kept in the ALT_SESSION_TOKEN secret. Mint one with:
+# npm run sniper:alt -- --export-session (after signing in once by hand with
+# --login). A typed-in value is recorded on the run's page like any other
+# input, where a secret is not.
+#
+# It reads nothing from the database and writes nothing back: the only cap on
+# a card is the "max copies per card" box — four lots of it winning or won in
+# this auction, whatever their grade or grader, counted by the run itself. An
+# outbid copy makes room for the next one down. The one artifact is
+# alt-bids.csv; the Actions log is the record of every bid, and the run
+# summary is the page.
+#
+# There is no schedule: every run is started by hand. Alt Auctions close every
+# Thursday, with extended bidding from 9 PM ET, so the Thursday morning Eastern
+# is the moment to fire it — the prices are then hours old rather than days.
+name: Alt sniper
+
+on:
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: "Budget in dollars, all-in (hammer + 20% buyer's premium)"
+        type: string
+        default: "100"
+      live:
+        description: "Place real bids (unticked: log only, nothing sent)"
+        type: boolean
+        default: false
+      count_existing_bids:
+        description: "Charge bids already on the account to the budget (unticked: the budget is on top of them)"
+        type: boolean
+        default: false
+      psa_tiers:
+        description: "PSA tier table, in dollars of the lowest recent sale: from-to: flat $N | market - $N | N%"
+        type: string
+        default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%"
+      cgc_tiers:
+        description: "CGC tier table, the same way"
+        type: string
+        default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 77%, $90-450: 70%"
+      max_copies_per_card:
+        description: "Most lots of one card to hold at once, counted across every grade and both graders"
+        type: string
+        default: "4"
+      token:
+        description: "Alt session token (blank: the ALT_SESSION_TOKEN secret)"
+        type: string
+        default: ""
+
+# One run at a time: two would collide on the same Card Uploader account's
+# Previous Batches page, and count the same budget twice.
+concurrency:
+  group: alt-sniper
+  cancel-in-progress: false
+
+jobs:
+  snipe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # A live run lasts as long as it holds an open bid: through extended
+    # bidding on a Thursday evening. 360 is the ceiling GitHub-hosted runners
+    # allow, so the job is given all of it. A run cut off there leaves its
+    # bids standing; the next run finds them on the account and leaves them
+    # alone.
+    timeout-minutes: 360
+
+    steps:
+      # A typed-in token is not a secret as far as Actions is concerned, so it is
+      # masked here before anything can echo it, and the run is stopped now —
+      # rather than after a scan — if a live run has no way in.
+      - name: Check the way in to Alt
+        env:
+          TYPED: ${{ inputs.token }}
+          STORED: ${{ secrets.ALT_SESSION_TOKEN }}
+        run: |
+          if [ -n "$TYPED" ]; then echo "::add-mask::$TYPED"; fi
+          if [ "${{ inputs.live }}" = "true" ] && [ -z "$TYPED" ] && [ -z "$STORED" ]; then
+            echo "::error::A live run needs an Alt session. Sign in locally with: npm run sniper:alt -- --login, then npm run sniper:alt -- --export-session — and paste the token into the token box, or store it as the ALT_SESSION_TOKEN secret."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Chromium is a 150 MB download every run without this. The cache is keyed
+      # on the lock file, so a Playwright upgrade fetches the browser it wants;
+      # the system libraries are cheap and installed either way.
+      - name: Cache Playwright's Chromium
+        id: playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - if: steps.playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # Left alone, the dispatch form's own defaults stand: a $100 plan, no
+      # bids sent, no Alt account touched.
+      - name: Scan, price and bid
+        run: >-
+          npm run sniper:alt --
+          --budget=${{ inputs.budget || '100' }}
+          ${{ inputs.live && '--live' || '' }}
+          ${{ inputs.count_existing_bids && '--count-existing-bids' || '' }}
+        env:
+          CARDUPLOADER_EMAIL: ${{ secrets.CARDUPLOADER_EMAIL }}
+          CARDUPLOADER_PASSWORD: ${{ secrets.CARDUPLOADER_PASSWORD }}
+          # Only a live run needs this: the stytch_session cookie of a signed-in
+          # browser, which the page's own sign-in SDK turns into the short-lived
+          # token every request carries. Typed into the run wins over the
+          # stored secret.
+          ALT_SESSION_TOKEN: ${{ inputs.token || secrets.ALT_SESSION_TOKEN }}
+          # The tier tables, through the environment rather than the command
+          # line: the lines carry "$" and spaces, which a shell would eat.
+          # Blank means the code's own defaults.
+          TIERS_PSA: ${{ inputs.psa_tiers }}
+          TIERS_CGC: ${{ inputs.cgc_tiers }}
+          # The per-card cap, the same way. Blank means the code's own default.
+          MAX_COPIES_PER_CARD: ${{ inputs.max_copies_per_card }}
+
+      - name: Publish summary
+        if: always()
+        run: cat alt-sniper-runs/*/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      # The bid list is the one file worth keeping: every lot worth a bid, what
+      # was bid, how it ended, and what a won lot cost against its market value.
+      - name: Upload the bid list
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alt-bids
+          path: alt-sniper-runs/*/alt-bids.csv
+          if-no-files-found: ignore
+          retention-days: 30
