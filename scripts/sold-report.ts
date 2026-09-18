@@ -2,8 +2,8 @@
  * Sold report — what every sold lot went for, and what the tier table should
  * therefore be.
  *
- * The snipers (scripts/sniper-core.ts) bid a share of a card's lowest recent
- * sale, band by band, grader by grader, and this works those shares out. It
+ * The snipers (scripts/sniper-core.ts) bid a share of a card's second-lowest
+ * recent sale, band by band, grader by grader, and this works those shares out. It
  * walks the closed auctions at both houses, keeps the lots the sniper would
  * have priced — the same candidates, block list, graders, grades and
  * sales-history rule — prices each one through Card Uploader exactly as the
@@ -26,9 +26,9 @@
  * rule, whatever the table would have done with it.
  *
  * Three numbers per lot, and the differences matter:
- *   - the lowest comp (sniper_market_price): the lowest of the card's five
- *     most recent sales, the lot's own sale left out. This is what a share
- *     multiplies, so it is the axis the curve is cut on.
+ *   - the bid basis (sniper_market_price): the second-lowest of the card's
+ *     five most recent sales, the lot's own sale left out. This is what a
+ *     share multiplies, so it is the axis the curve is cut on.
  *   - market value: the same five sales, highest and lowest dropped, the
  *     other three averaged — what the card is worth, and what a price paid
  *     is measured against.
@@ -124,6 +124,7 @@ import {
   type TierBand,
   type TierTable,
   type Venue,
+  bidBasis,
 } from "./sniper-core";
 import { writeXlsx, type Cell, type Sheet } from "./xlsx";
 
@@ -172,7 +173,7 @@ export const BUCKET_TO = 100;
 export const BUCKET_STEP = 5;
 
 /**
- * The price axis the curve is cut on, in dollars of the lowest comp — fixed,
+ * The price axis the curve is cut on, in dollars of the bid basis — fixed,
  * and nothing to do with the table being judged.
  *
  * These are the boundaries a recommended table may be built out of, so the
@@ -191,10 +192,10 @@ const CHEAP_BAND_TOP = 10;
  * The shares the recommendation searches, in percent.
  *
  * Wider than the buckets, and deliberately past 100%: a share multiplies the
- * LOWEST of five comps, which runs about 89% of market value, and the winner
- * pays the runner-up's bid rather than their own max — so 100% of the lowest
- * comp is nothing like paying market value, and the best share in a band is
- * often above it. Searching only to 100% pinned band after band against the
+ * bid basis — the second-lowest of five comps, which sits under market value
+ * (the lowest ran about 89% of it) — and the winner pays the runner-up's bid
+ * rather than their own max — so 100% of the basis is nothing like paying
+ * market value, and the best share in a band is often above it. Searching only to 100% pinned band after band against the
  * ceiling and called it the answer.
  */
 export const SHARE_SEARCH_FROM = 50;
@@ -422,7 +423,7 @@ function medianOf(values: number[]): number | "" {
 
 // ── The table's bands ─────────────────────────────────────────────────────────
 
-/** One band of the price grid the curve is drawn over, in dollars of the lowest comp. */
+/** One band of the price grid the curve is drawn over, in dollars of the bid basis. */
 export type Band = {
   label: string;
   from: number;
@@ -443,12 +444,12 @@ export function inBand(band: Band, price: number): boolean {
   return aboveFrom && price < band.to;
 }
 
-/** The label of the grid band a lowest comp falls in. */
+/** The label of the grid band a bid basis falls in. */
 export function gridBandLabel(price: number, grid: number[] = PRICE_GRID): string {
   return gridBands(grid).find((b) => inBand(b, price))?.label ?? "";
 }
 
-/** The label of the band of a tier table a lowest comp falls in — what the sniper branched on, for the record. */
+/** The label of the band of a tier table a bid basis falls in — what the sniper branched on, for the record. */
 export function tierBandLabel(grader: Grader, price: number, table: TierTable = tierTable()): string {
   const { floor, bands } = table[grader];
   if (price < floor) return `<$${floor}`;
@@ -562,13 +563,13 @@ export type LotRow = {
   /** Paid all-in as a share of market value: the figure the buckets count. */
   all_in_pct: number | "";
   bucket: string;
-  /** What the sniper's bid is worked from: the lowest comp, the lot's own sale left out. */
+  /** What the sniper's bid is worked from: the second-lowest comp, the lot's own sale left out. */
   sniper_market_price: number | "";
-  /** The lowest comp as a share of market value: how far under the middle the table's base sits. */
+  /** The bid basis as a share of market value: how far under the middle the table's base sits. */
   low_pct_of_value: number | "";
-  /** The band of the fixed price grid the lowest comp falls in — the axis the curve is cut on. */
+  /** The band of the fixed price grid the bid basis falls in — the axis the curve is cut on. */
   grid_band: string;
-  /** The band of the table this run was given that the lowest comp falls in — what the sniper branched on. */
+  /** The band of the table this run was given that the bid basis falls in — what the sniper branched on. */
   tier_band: string;
   tier_rule: string;
   sniper_max_hammer: number | "";
@@ -667,10 +668,10 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
     row.own_sale_in_comps = own >= 0 ? "yes" : "no";
     // The sniper never saw this lot's own sale — it was pricing hours before
     // the close — so its bid is worked from the comps without it. A cheap
-    // sale of this very lot would otherwise be the lowest of the five, and
-    // the tier table would be measured against the lot's own price.
+    // sale of this very lot would otherwise sit among the lowest of the five,
+    // and the tier table would be measured against the lot's own price.
     const others = prices.filter((_, i) => i !== own);
-    row.sniper_market_price = others.length > 0 ? Math.min(...others) : "";
+    row.sniper_market_price = bidBasis(others) ?? "";
     if (value !== null) {
       row.market_value = value;
       row.hammer_pct = pctOf(lot.hammer, value);
@@ -691,7 +692,7 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
   row.grid_band = gridBandLabel(row.sniper_market_price);
   row.tier_band = tierBandLabel(candidate.grader, row.sniper_market_price);
 
-  // The sniper's own bid on this lot, from the tier table off the lowest comp.
+  // The sniper's own bid on this lot, from the tier table off the bid basis.
   const bid = maxBid(candidate.grader, row.sniper_market_price);
   if (!bid) {
     row.status = row.sniper_market_price < tierFloor(candidate.grader)
@@ -709,7 +710,7 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
   return row;
 }
 
-/** Whether this rule, on this lot's lowest comp, would have sent a bid that beat the hammer — at the lot's own house's ladder. */
+/** Whether this rule, on this lot's bid basis, would have sent a bid that beat the hammer — at the lot's own house's ladder. */
 export function wonBy(row: LotRow, rule: BidRule): boolean {
   if (row.sniper_market_price === "") return false;
   const bid = applyRule(rule, Number(row.sniper_market_price));
@@ -870,7 +871,7 @@ export function answersFor(rows: LotRow[], grader: Grader, resale: ResaleTable =
 }
 
 export const CURVE_COLUMNS: string[] = [
-  "venue", "grader", "band", "lots", "median lowest comp $", "median market value $", "resale rate %",
+  "venue", "grader", "band", "lots", "median bid basis $", "median market value $", "resale rate %",
   "rule", "could win", "win rate %", "paid all-in $", "market value won $", "resells for $", "profit $", "margin % of spend", "profit per lot $", "best",
 ];
 
@@ -1292,14 +1293,14 @@ export function notesSheet(now: Date, asked: Record<VenueKey, number>, funnels: 
     ["auctions", `Fanatics Collect: ${got("fanatics")} of ${asked.fanatics} asked for; Alt: ${got("alt")} of ${asked.alt} asked for. Fewer means fewer exist.`],
     ["tier table", `The table this run compares against — its --tiers-psa / --tiers-cgc, else the snipers' defaults. ${GRADERS.map((g) => `${g}: ${formatTiers(tierTable()[g])}`).join("; ")}. Each band is "<from>-<to>: <rule>" in dollars of the lowest comp; the first band's start is the floor, under which nothing is bid. It gates nothing here: the curve is drawn over every lot that passed the sales rule, and the table only supplies the "as configured" row each band is measured against.`],
     ["resale rates", `What a card resells for, net, as a share of its market value, by grader and by what it is worth: ${GRADERS.map((g) => `${g}: ${formatResale(resaleTable()[g])}`).join("; ")}. Given with --resale-psa / --resale-cgc or RESALE_PSA / RESALE_CGC. This is the one number the report cannot work out for itself, and every profit and every recommendation follows from it — wrong rates here mean a wrong table recommended with complete confidence.`],
-    ["the price grid", `The curve is cut on a fixed grid of the lowest comp — ${gridBands().map((b) => b.label).join(", ")} — not on the bands of any table. A grid that came from the table being judged could never say a boundary was in the wrong place. Adjacent bands that want the same rule are merged when the recommendation is written, so the line that comes out is as short as the data allows.`],
+    ["the price grid", `The curve is cut on a fixed grid of the bid basis — ${gridBands().map((b) => b.label).join(", ")} — not on the bands of any table. A grid that came from the table being judged could never say a boundary was in the wrong place. Adjacent bands that want the same rule are merged when the recommendation is written, so the line that comes out is as short as the data allows.`],
     ["the recommendation", `Per house and grader: the rule that made the most money in each band, neighbours merged, with the ends trimmed where a band could not clear ${minMargin}% profit on its spend — which is what sets the floor and the ceiling. Best is by profit, not by margin: margin alone picks the stingiest rule that ever wins (one lot at 50% shows a huge return on a tiny spend) and builds a table that bids on nothing. Interior bands keep their rule whatever the margin, because a table's bands have to touch.`],
     ["shares searched", `${SHARE_SEARCH_FROM}% to ${SHARE_SEARCH_TO}% in steps of ${BUCKET_STEP}, which goes past 100% on purpose. A share multiplies the LOWEST of the five comps — about 89% of market value — and the winner pays the runner-up's bid rather than their own max, so 100% of the lowest comp is nothing like paying market value and the best share in a band is often above it. The buckets are a different question and still stop at 100%.`],
     ["too few wins", `A band whose best rule rests on fewer than ${minWins} wins is a rule fitted to those lots rather than a rule. It takes the nearest believed band's rule instead — below for preference, since bidding a cheaper band's share errs toward paying less — and the Recommended sheet says which band it borrowed from. Such a band also cannot be the floor or the ceiling.`],
     ["the budget", "Without --budget every band takes the rule that made the most money, which answers \"what is the best table\" and not \"what is the best table I can afford\". With one, the rules are chosen together — one per band, across both graders, spend summed against the budget and profit maximised — and spend is read per auction rather than over the whole run. The budget may only push a band's rule DOWN from its unconstrained best, never up."],
     ["what the profit still ignores", "That the budget comes back. Some 97% of bids are outbid and hand their share straight back, so one evening turns a budget over many times and the real ceiling is well above what a single fill of it buys — the budgeted table is the cautious end. It also ignores the per-card cap, the credits identify costs, and the time between buying and selling. Treat all of it as the ranking between shares, which is what it is good for, rather than as a forecast of the week."],
     ["which lots", `Sold PSA/CGC 7–10 Pokémon lots that pass the sniper's own filters: at Fanatics the chase list, at Alt every lot; the block list; a cert; and the sales rule — ${MIN_SALES} sales, every one inside the last ${SALES_WINDOW_DAYS} days, applied to the sales as of the run rather than as of the auction. Card Uploader answers with the five most recent only, so an older auction is judged on comps that post-date it.`],
-    ["lowest comp", "sniper_market_price: the lowest of the five sales with the lot's own sale left out — what the sniper, pricing hours before the close, would have worked from, and the price the table's shares multiply. The share curve is drawn on it."],
+    ["bid basis", "sniper_market_price: the second-lowest of the five sales with the lot's own sale left out — what the sniper, pricing hours before the close, would have worked from, and the price the table's shares multiply. The share curve is drawn on it. (The lowest until 2026-09-17; market_low still shows it.)"],
     ["market value", `The same ${MIN_SALES} sales, highest and lowest dropped, the other ${MIN_SALES - 2} averaged. What a price paid is measured against: all_in_pct = paid all-in ÷ market value, and paid % of value (won) = what a rule's wins would have cost ÷ what they were worth, which is the resale rate that band would have to clear.`],
     ["own sale", "Both houses' sales reach Card Ladder, so a lot closed recently is often one of its own card's five comps. own_sale_in_comps says so per lot. The trimmed mean drops a cheap sale as the low and a dear one as the high, so only lots that sold near their market value are pulled toward 100%."],
     ["all-in", `Hammer plus the ${Math.round(BUYERS_PREMIUM * 100)}% buyer's premium: what the winner paid. Fanatics publishes it; Alt's sold prices include it, so the hammer there is derived.`],

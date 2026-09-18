@@ -218,20 +218,28 @@ describe("tier table", () => {
 describe("market price", () => {
   const at = (price: number) => ({ price, date: "2026-09-01" });
 
-  test("the lowest of the recent sales, not their average", () => {
+  test("the second-lowest of the recent sales, not their average and not the lowest", () => {
     const m = marketPrice([60, 64, 70, 72, 74].map(at));
-    expect(m.price).toBe(60);
+    expect(m.price).toBe(64);
     expect(m.used).toHaveLength(5);
   });
 
-  test("a comp that is far too high costs nothing, because the lowest is taken", () => {
+  test("a comp that is far too high costs nothing: the two highest never touch the basis", () => {
     // The real case: Card Ladder filed a $635 Base Set Charizard among five
     // sales of a Japanese SV151 AR Psyduck PSA 10.
-    expect(marketPrice([127.66, 91, 89, 93, 635].map(at)).price).toBe(89);
+    expect(marketPrice([127.66, 91, 89, 93, 635].map(at)).price).toBe(91);
   });
 
-  test("a comp that is too low only makes the bid smaller", () => {
-    expect(marketPrice([2, 58, 60, 62, 68].map(at)).price).toBe(2);
+  test("one comp that is far too low no longer sinks the bid", () => {
+    expect(marketPrice([2, 58, 60, 62, 68].map(at)).price).toBe(58);
+    // Two of them still do: the second-lowest is the second of them.
+    expect(marketPrice([2, 3, 60, 62, 68].map(at)).price).toBe(3);
+  });
+
+  test("with one sale, that sale; with two, the higher; with none, nothing", () => {
+    expect(marketPrice([50].map(at)).price).toBe(50);
+    expect(marketPrice([50, 40].map(at)).price).toBe(50);
+    expect(marketPrice([]).price).toBeNull();
   });
 
   test("only the five newest sales count", () => {
@@ -242,7 +250,7 @@ describe("market price", () => {
       on(56, "2026-09-02"), on(58, "2026-09-01"),
     ]);
     expect(m.used.map((s) => s.price)).toEqual([50, 52, 54, 56, 58]);
-    expect(m.price).toBe(50);
+    expect(m.price).toBe(52);
   });
 
   test("no sales at all", () => {

@@ -63,8 +63,9 @@
  *      name, set, number, language, population — which is what card_key and the
  *      per-card cap are built from. The batch is deleted afterwards;
  *      a left-over from a crashed run is swept up at the start of the next.
- *   4. Bid maths. What the card is worth is the lowest of its five most
- *      recent sales — not the average, which is a bid that only breaks even.
+ *   4. Bid maths. What the card is worth is the second-lowest of its five
+ *      most recent sales — not the average, which is a bid that only breaks
+ *      even, and not the lowest, which one wrong comp could sink.
  *      A lot is worth a bid when the cert resolved, those five sales all fall
  *      inside the last SALES_WINDOW_DAYS, neither that price nor the median
  *      of the same sales is a value no pack can award (the sourcing check:
@@ -174,6 +175,7 @@ import { unawardableReason } from "@/lib/odds-config";
 import {
   MIN_SALES,
   SALES_WINDOW_DAYS,
+  bidBasis,
   marketPrice,
   recentSales,
   salesGate,
@@ -186,7 +188,7 @@ export { BUYERS_PREMIUM };
 // The sales rule and the price that comes out of it are shared with
 // scripts/verify-prices.ts and live in ./cert-price; every caller of the
 // sniper reads them from here, as they always have.
-export { MIN_SALES, SALES_WINDOW_DAYS, marketPrice, recentSales, salesGate, salesMedian, type Sale };
+export { MIN_SALES, SALES_WINDOW_DAYS, bidBasis, marketPrice, recentSales, salesGate, salesMedian, type Sale };
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -827,7 +829,7 @@ export function marketPct(paidAllIn: number, median: number): number | "" {
  * jackpot ceiling and Infernal's jackpot floor. A slab worth a value in a hole
  * would sit in the vault unawardable, so it is not bought. Two figures are
  * asked about: the sales median, which stands in for the appraisal the card
- * would be given once imported, and the bid basis — the lowest recent sale —
+ * would be given once imported, and the bid basis — the second-lowest recent sale —
  * which is what the bid is priced from. Either one in a hole fails the lot,
  * whatever tier table the run was given. Dollars are rounded to whole cents
  * before the ladder is asked.
@@ -837,7 +839,7 @@ export function marketPct(paidAllIn: number, median: number): number | "" {
 export function unawardableLotReason(lot: { medianDollars: number | null; basisDollars: number | null }): string | null {
   const figures: [string, number | null][] = [
     ["sales median", lot.medianDollars],
-    ["bid basis (lowest sale)", lot.basisDollars],
+    ["bid basis (second-lowest sale)", lot.basisDollars],
   ];
   for (const [figure, value] of figures) {
     if (value === null || !Number.isFinite(value)) continue;
@@ -1604,7 +1606,7 @@ export type Row = {
   grader: string;
   grade: string;
   cert: string;
-  /** The lowest of the last five sales: what the bid is worked out from. */
+  /** The second-lowest of the last five sales: what the bid is worked out from. */
   market_price: number | "";
   /** The median of the same five: what the card goes for. */
   sales_median: number | "";
@@ -1902,7 +1904,7 @@ function summaryMarkdown(
     lines.push(``,
       `${unawardable.length} of those failed the sourcing check: the card is worth a value no pack can award (lib/odds-config.ts), so the lot is not bought at any price. For example:`, ``);
     for (const r of unawardable.slice(0, 5)) {
-      lines.push(`- ${r.lot}: lowest sale $${r.market_price}, median $${r.sales_median} — ${r.unawardable} — [${r.title.slice(0, 60)}](${r.url})`);
+      lines.push(`- ${r.lot}: bid basis $${r.market_price}, median $${r.sales_median} — ${r.unawardable} — [${r.title.slice(0, 60)}](${r.url})`);
     }
     if (unawardable.length > 5) lines.push(`- …and ${unawardable.length - 5} more`);
   }

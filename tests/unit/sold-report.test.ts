@@ -122,7 +122,7 @@ describe("the price grid", () => {
     expect(tierBandLabel("CGC", 10, DEFAULT_TIERS)).toBe("$10-90");
   });
 
-  test("the shares searched run past 100%, because a share multiplies the lowest comp and not market value", () => {
+  test("the shares searched run past 100%, because a share multiplies the bid basis and not market value", () => {
     expect(shareSearch()[0]).toBe(50);
     expect(shareSearch().at(-1)).toBe(SHARE_SEARCH_TO);
     expect(SHARE_SEARCH_TO).toBeGreaterThan(100);
@@ -270,7 +270,7 @@ function priced(prices: number[], daysAgo: number[] = [1, 5, 10, 15, 20]): CuPri
 const NOW = new Date("2026-09-10T00:00:00Z");
 
 describe("evaluating a sold lot", () => {
-  test("an eligible lot: market value off the middle three, the sniper's bid off the lowest, both percentages", () => {
+  test("an eligible lot: market value off the middle three, the sniper's bid off the second-lowest, both percentages", () => {
     const l = lot();
     const { candidates } = selectCandidates([l], () => {});
     const row = evaluateSold(AUCTION, l, candidates[0], priced([80, 95, 100, 105, 130]), NOW);
@@ -282,15 +282,15 @@ describe("evaluating a sold lot", () => {
     expect(row.hammer_pct).toBe(60);
     expect(row.all_in_pct).toBe(72);
     expect(row.bucket).toBe("70-75%");
-    // PSA, $80 lowest comp → the $10–90 band at 85% all-in = $68, $56 hammer: under the $60 hammer, so no.
-    expect(row.sniper_market_price).toBe(80);
-    expect(row.low_pct_of_value).toBe(80);
-    expect(row.tier_band).toBe("$10-90");
-    expect(row.tier_rule).toBe("85% all-in");
-    expect(row.sniper_max_all_in).toBe(68);
-    expect(row.sniper_max_hammer).toBe(56);
-    expect(row.sniper_max_pct).toBe(68);
-    expect(row.sniper_could_win).toBe("no");
+    // PSA, $95 second-lowest comp → the $90–450 band at 80% all-in = $76, $63 hammer: over the $60 hammer, so yes.
+    expect(row.sniper_market_price).toBe(95);
+    expect(row.low_pct_of_value).toBe(95);
+    expect(row.tier_band).toBe("$90-450");
+    expect(row.tier_rule).toBe("80% all-in");
+    expect(row.sniper_max_all_in).toBe(76);
+    expect(row.sniper_max_hammer).toBe(63);
+    expect(row.sniper_max_pct).toBe(76);
+    expect(row.sniper_could_win).toBe("yes");
     expect(row.own_sale_in_comps).toBe("no");
   });
 
@@ -346,13 +346,13 @@ describe("evaluating a sold lot", () => {
     expect(row.own_sale_in_comps).toBe("yes");
     // The trimmed mean dropped it as the low, so market value is unmoved.
     expect(row.market_value).toBe(100);
-    // The sniper's bid is worked from $95, the lowest comp that is not this lot — not from the lot's own $72:
-    // the $90–450 band, 80% all-in = $76, a $63 hammer.
+    // The sniper's bid is worked from $100, the second-lowest of the comps that are not this lot — not from
+    // the lot's own $72, nor the $95 that is lowest without it: the $90–450 band, 80% all-in = $80, a $66 hammer.
     expect(row.market_low).toBe(72);
-    expect(row.sniper_market_price).toBe(95);
+    expect(row.sniper_market_price).toBe(100);
     expect(row.tier_band).toBe("$90-450");
-    expect(row.sniper_max_all_in).toBe(76);
-    expect(row.sniper_max_hammer).toBe(63);
+    expect(row.sniper_max_all_in).toBe(80);
+    expect(row.sniper_max_hammer).toBe(66);
   });
 
   test("the lots are judged under the table the run was given", () => {
@@ -365,7 +365,8 @@ describe("evaluating a sold lot", () => {
       const row = evaluateSold(AUCTION, l, candidates[0], priced([80, 95, 100, 105, 130]), NOW);
       expect(row.tier_band).toBe("$10-200");
       expect(row.tier_rule).toBe("100% all-in");
-      expect(row.sniper_max_hammer).toBe(66);
+      // 100% of the $95 basis all-in is a $79 hammer.
+      expect(row.sniper_max_hammer).toBe(79);
       expect(row.sniper_could_win).toBe("yes");
     } finally {
       setTierTable(before);
@@ -375,7 +376,7 @@ describe("evaluating a sold lot", () => {
 
 // ── The sheets ───────────────────────────────────────────────────────────────
 
-/** A priceable lot: market value $100, lowest comp $90, paid `pct`% of market value. Eligible under the default table unless told otherwise. */
+/** A priceable lot: market value $100, bid basis $90, paid `pct`% of market value. Eligible under the default table unless told otherwise. */
 const row = (venueKey: "fanatics" | "alt", pct: number, over: Partial<LotRow> = {}): LotRow => {
   const low = over.sniper_market_price ?? 90;
   return {
@@ -393,8 +394,8 @@ const row = (venueKey: "fanatics" | "alt", pct: number, over: Partial<LotRow> = 
 };
 
 describe("the share curve", () => {
-  test("a rule wins a lot when the bid it makes off the lowest comp beats the hammer, at the lot's own house's ladder", () => {
-    // Lowest comp $90. 70% all-in is $63, a $52 hammer: beats a $50 hammer, not a $75 one.
+  test("a rule wins a lot when the bid it makes off the bid basis beats the hammer, at the lot's own house's ladder", () => {
+    // Bid basis $90. 70% all-in is $63, a $52 hammer: beats a $50 hammer, not a $75 one.
     expect(wonBy(row("alt", 60), { kind: "share", share: 0.7 })).toBe(true);
     expect(wonBy(row("alt", 90), { kind: "share", share: 0.7 })).toBe(false);
     // Even 100% ($90 all-in, $75 hammer) does not beat a $75 hammer.
@@ -471,7 +472,7 @@ describe("the share curve", () => {
 });
 
 describe("the table the numbers point to", () => {
-  /** A lot whose five comps all agree, so its lowest comp is its market value. */
+  /** A lot whose five comps all agree, so its bid basis is its market value. */
   const flat = (venueKey: "fanatics" | "alt", low: number, hammer: number, grader = "PSA"): LotRow =>
     row(venueKey, 0, {
       grader, sniper_market_price: low, market_low: low, market_value: low, market_high: low, low_pct_of_value: 100,

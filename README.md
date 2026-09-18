@@ -20,8 +20,10 @@ own GitHub Actions minutes; nothing here reads or writes the app's database.
 `carduploader-batch.ts`, `carduploader-comps.ts`, `ebay-csv.ts`,
 `cert-price.ts`, `lib/odds-config.ts` and `lib/price-confidence.ts` are copies
 of files the app repository also has, and were identical on the day of the
-split. When one changes there, it has to change here. Everything else moved
-and is gone from the app.
+split. When one changes there, it has to change here — with one deliberate
+exception: since 2026-09-17 this copy of `cert-price.ts` prices a bid off the
+second-lowest of the five recent sales, the app's still uses the lowest as
+its floor. Everything else moved and is gone from the app.
 
 ## Running one
 
@@ -60,6 +62,11 @@ bidding opens, and each house has its own rule:
 `--budget` is a ceiling on what the run may hold at once, all-in — $10,000
 unless told — and not a target: how many lots are won is the tier table's
 and the per-card cap's doing.
+
+The tier table's shares multiply the card's second-lowest recent sale (of
+the five Card Uploader returns, all inside 60 days). The lowest until
+2026-09-17: one bad comp on the low side sank the bid on a card the other
+four agreed about.
 
 ## In Actions
 

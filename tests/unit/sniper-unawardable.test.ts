@@ -66,7 +66,7 @@ describe("what no pack can award", () => {
       .toMatch(/^sales median \$6\.5: No pack can award \$6\.50: the ladder starts at \$7\.50$/);
     // The median clears the floor and the bid basis does not: still no.
     expect(unawardableLotReason({ medianDollars: 8, basisDollars: 6.99 }))
-      .toMatch(/^bid basis \(lowest sale\) \$6\.99: No pack can award \$6\.99: the ladder starts at \$7\.50$/);
+      .toMatch(/^bid basis \(second-lowest sale\) \$6\.99: No pack can award \$6\.99: the ladder starts at \$7\.50$/);
   });
 
   test("in the hole between Gaia's jackpot ceiling and Infernal's jackpot floor", () => {
@@ -113,7 +113,8 @@ describe("the bid decision", () => {
   test("rejects an unawardable lot with the reason, before the table is consulted", () => {
     const { row, worthy } = evaluate(candidate(), priced([7.25, 7, 7, 6.5, 6]), NOW);
     expect(worthy).toBe(false);
-    expect(row.market_price).toBe(6);
+    // The basis is the second-lowest sale, $6.50; the median is judged first and is under the floor too.
+    expect(row.market_price).toBe(6.5);
     expect(row.sales_median).toBe(7);
     expect(row.reason).toMatch(/^unawardable: sales median \$7: No pack can award \$7\.00: the ladder starts at \$7\.50$/);
     expect(row.unawardable).toBe(row.reason.slice("unawardable: ".length));
@@ -138,8 +139,8 @@ describe("the bid decision", () => {
   });
 
   test("an awardable lot goes through with the column empty", () => {
-    // Lowest sale $7.75: on the ladder ($7.50 up) and in the flat-$5 band.
-    const { row, worthy } = evaluate(candidate(), priced([12, 10, 9, 9, 7.75]), NOW);
+    // Second-lowest sale $7.75: on the ladder ($7.50 up) and in the flat-$5 band.
+    const { row, worthy } = evaluate(candidate(), priced([12, 10, 9, 7.75, 7.6]), NOW);
     expect(worthy).toBe(true);
     expect(row.unawardable).toBe("");
     expect(row.reason).toBe("");

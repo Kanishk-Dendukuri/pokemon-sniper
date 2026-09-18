@@ -3,11 +3,12 @@
  * enough to say.
  *
  * Both halves of the business read this: the snipers price a lot before
- * bidding on it (scripts/sniper-core.ts, in its own repository), and
- * scripts/verify-prices.ts checks a vault card's stored price against the same
- * evidence. The standard for "we know what this is worth" has to be one
- * standard whether we are buying a card or telling a customer what they won,
- * so it lives in one file and is imported rather than restated.
+ * bidding on it (scripts/sniper-core.ts), and the app's scripts/verify-prices.ts
+ * checks a vault card's stored price against the same evidence. The sales rule
+ * — how many, how recent — is one standard in both copies. The bid basis is
+ * not, since 2026-09-17: this copy takes the second-lowest of the five sales
+ * (marketPrice below), the app's still takes the lowest as its floor. Change
+ * one deliberately, not by copying the other over it.
  *
  * The sales themselves come from Card Uploader's per-cert lookup, which is
  * free and answers for any cert.
@@ -39,24 +40,37 @@ export function recentSales(sales: Sale[], count = MIN_SALES): Sale[] {
 }
 
 /**
- * What a card is worth: the lowest of those five sales.
+ * The bid basis, from a list of sale prices: the second-lowest of them. With
+ * one price, that price; with none, null. Sold-report and the sniper price
+ * off the same rule through this.
+ */
+export function bidBasis(prices: number[]): number | null {
+  const sorted = prices.filter((p) => p > 0).sort((a, b) => a - b);
+  return sorted.length >= 2 ? sorted[1] : sorted.length === 1 ? sorted[0] : null;
+}
+
+/**
+ * What a card is worth, for the bid: the second-lowest of those five sales.
  *
- * The lowest rather than the average, because a bid at the average is a bid
- * that only breaks even. Nothing is thrown out first, and it does not need to
- * be — taking the lowest already ignores a comp that is too high, and Card
- * Ladder does file the odd wrong card (a $635 Base Set Charizard once turned
- * up among five sales of a $90 Psyduck). A comp that is wrong on the low side
- * only ever makes the bid smaller, which loses the lot rather than money.
+ * Not the average, because a bid at the average is a bid that only breaks
+ * even. Not the lowest either, since 2026-09-17: one wrong comp on the low
+ * side — a damaged copy, a mislabelled grade, a sale Card Ladder filed under
+ * the wrong card — sank the bid to nothing on a card the other four sales
+ * agreed about, and lost the lot for no reason. The second-lowest throws
+ * that one out and is still a cautious figure: the two highest of the five
+ * never touch it, so the odd comp that is far too high (a $635 Base Set
+ * Charizard once turned up among five sales of a $90 Psyduck) costs nothing
+ * either.
  */
 export function marketPrice(sales: Sale[], count = MIN_SALES): { price: number | null; used: Sale[] } {
   const used = recentSales(sales, count);
-  return { price: used.length > 0 ? Math.min(...used.map((s) => s.price)) : null, used };
+  return { price: bidBasis(used.map((s) => s.price)), used };
 }
 
 /**
  * The card's market value: the median of the same five sales.
  *
- * The bid is worked out from the lowest of them, on purpose; the median is what
+ * The bid is worked out from the second-lowest of them, on purpose; the median is what
  * the card actually goes for, and it is what a won lot's price is measured
  * against — paid all-in, as a share of this — in the CSV.
  */

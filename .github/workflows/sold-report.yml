@@ -53,7 +53,7 @@ on:
         type: string
         default: "4"
       psa_tiers:
-        description: "PSA tier table to judge the lots under, in dollars of the lowest recent sale: from-to: flat $N | market - $N | N%"
+        description: "PSA tier table to judge the lots under, in dollars of the second-lowest recent sale: from-to: flat $N | market - $N | N%"
         type: string
         default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%"
       cgc_tiers:

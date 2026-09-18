@@ -22,7 +22,7 @@
 # fires at once rather than hold through the close.
 #
 # The tier table — what to bid on a card by what it is worth — is typed into
-# the run, one line per grader, in dollars of the card's lowest recent sale:
+# the run, one line per grader, in dollars of the card's second-lowest recent sale:
 # "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%" bids a flat
 # $5 on a card worth $7.50–8, $3 under on one worth $8–10, 85% all-in of one
 # worth $10–90 and 80% of one worth $90–450; under $7.50 and over $450 nothing is
@@ -76,7 +76,7 @@ on:
         type: boolean
         default: false
       psa_tiers:
-        description: "PSA tier table, in dollars of the lowest recent sale: from-to: flat $N | market - $N | N%"
+        description: "PSA tier table, in dollars of the second-lowest recent sale: from-to: flat $N | market - $N | N%"
         type: string
         default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%"
       cgc_tiers:
