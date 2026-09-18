@@ -59,6 +59,15 @@ bidding opens, and each house has its own rule:
 | Fanatics Collect | 7:00 PM PT Sunday | lot by lot: no bid 7:00–7:30 closes it at 7:30 sharp; then 5 min after the last bid; after 8:00, 1 min | 27 min in, 7:27 PM |
 | Alt | 9:00 PM ET Thursday | all together: any bid extends every lot by the window of the hour (2 min, 1 min, 30 s, 15 s); ends after one quiet window; runs to 12–2:30 AM | 100 min in, 10:40 PM, or sooner if the clock reads seconds from the end |
 
+Alt keeps two or three auctions open at once, a week apart, and every one of
+them takes bids. A run scans only the auction closing first — the one whose
+extended bidding the fire is timed to — and leaves the cycle behind it alone,
+since a bid put on next week's lots tonight would stand there all week for
+anyone to answer. `--auction` overrides that: an auction's id, or any part of
+its name, or several separated by commas (`--auction="Sep 04"`, or the AUCTION
+environment variable). An auction that matches nothing open stops the run
+before the scan and names the ones there are.
+
 `--budget` is a ceiling on what the run may hold at once, all-in — $10,000
 unless told — and not a target: how many lots are won is the tier table's
 and the per-card cap's doing.

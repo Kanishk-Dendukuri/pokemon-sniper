@@ -21,6 +21,14 @@
 # Should the auction's clock read seconds from its end before then, the run
 # fires at once rather than hold through the close.
 #
+# Which auction. Alt keeps two or three open at once, a week apart, and all of
+# them take bids. A run scans only the auction closing first — the one whose
+# extended bidding the fire above is timed to — and leaves the cycle behind it
+# alone: a bid put on next week's lots at tonight's fire would stand there all
+# week for anyone to answer. To scan a different one, run it locally with
+# --auction="Sep 04" (an auction's id or any part of its name); there is no box
+# for it here, since workflow_dispatch allows ten and these are the ten.
+#
 # The tier table — what to bid on a card by what it is worth — is typed into
 # the run, one line per grader, in dollars of the card's bid basis (the value
 # basis box, the second-lowest of its five recent sales by default):

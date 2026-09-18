@@ -33,6 +33,7 @@
  *   npm run sniper:alt -- --live                place the bids, poll, rebid what is outbid
  *   npm run sniper:alt -- --login               sign in to Alt by hand, once, and save the session
  *   npm run sniper:alt -- --export-session      print the session token for the GitHub secret
+ *   npm run sniper:alt -- --auction="Sep 04"    scan that auction rather than the one closing first
  * and the flags every venue shares — see scripts/sniper-core.ts.
  */
 
@@ -43,6 +44,7 @@ import {
   GRADES,
   fmtLocal,
   parallel,
+  opt,
   runAsMain,
   type ScannedLot,
   type Venue,
@@ -64,10 +66,11 @@ const KEY_MARGIN_S = 60;
 const CERT_CONCURRENCY = 16;
 
 /**
- * How far ahead an auction may close and still be scanned. Alt has three
- * cycles open at once; only the one closing this Thursday is worth a bid list.
+ * How far past the soonest close another cycle may end and still count as
+ * closing with it. Alt's cycles are a week apart, so this only has to clear
+ * one night of extended bidding, which has run as late as 2:30 AM.
  */
-const AUCTION_WINDOW_DAYS = 7;
+const SAME_CLOSE_GRACE_S = 6 * 3_600;
 
 /** Alt's grade key for a CGC Pristine 10, which its grade field calls "PRI". */
 const CGC_PRISTINE_KEY = "CGC-PRI";
@@ -164,18 +167,45 @@ export function gradeKeys(): string[] {
 const fmtEastern = (unixS: number) => fmtLocal(unixS, TIME_ZONE, "ET");
 
 /**
- * The cycle about to close, from Alt's own list: the soonest one still open,
- * so long as it closes inside AUCTION_WINDOW_DAYS — and failing that the
- * soonest anyway, rather than scanning nothing.
+ * The auction about to close, from Alt's own list.
+ *
+ * Alt keeps two or three cycles open at once and they overlap, so "closing
+ * soon" is never one auction: on the Thursday night a cycle is in extended
+ * bidding, the cycle a week behind it is open too and takes bids just the
+ * same. Only the one closing tonight is worth a bid list — a bid put on next
+ * week's lots at tonight's fire would stand there for a week for anyone to
+ * answer — so what is scanned is the soonest close and anything closing with
+ * it, and never the cycle behind.
+ *
+ * `want` overrides that pick: a cycle id, or any part of a cycle's name, or
+ * several of either separated by commas.
  */
-export function pickCycles(cycles: Cycle[], nowS: number): { chosen: Cycle[]; skipped: Cycle[] } {
+export function pickCycles(cycles: Cycle[], nowS: number, want = ""): { chosen: Cycle[]; skipped: Cycle[] } {
   const ends = (c: Cycle) => Math.floor(Date.parse(c.expiresAt ?? "") / 1000) || 0;
   const open = cycles
     .filter((c) => c.state !== "ENDED" && c.state !== "CANCELED" && ends(c) > nowS)
     .sort((a, b) => ends(a) - ends(b));
-  const soon = open.filter((c) => ends(c) <= nowS + AUCTION_WINDOW_DAYS * 86_400);
-  const chosen = soon.length > 0 ? soon : open.slice(0, 1);
+  const wanted = want.split(",").map((w) => w.trim().toLowerCase()).filter(Boolean);
+  if (wanted.length > 0) {
+    const chosen = open.filter((c) => wanted.some((w) => String(c.id) === w || (c.name ?? "").toLowerCase().includes(w)));
+    if (chosen.length === 0) {
+      const names = open.map((c) => `${c.name} (id ${c.id})`).join(", ") || "none";
+      throw new Error(`no open Alt auction matches --auction="${want}". Open now: ${names}`);
+    }
+    return { chosen, skipped: open.filter((c) => !chosen.includes(c)) };
+  }
+  if (open.length === 0) return { chosen: [], skipped: [] };
+  const soonest = ends(open[0]);
+  const chosen = open.filter((c) => ends(c) <= soonest + SAME_CLOSE_GRACE_S);
   return { chosen, skipped: open.filter((c) => !chosen.includes(c)) };
+}
+
+/**
+ * Which auction to scan, as this run was told: --auction=, else the AUCTION
+ * environment variable, else blank for the one closing soonest.
+ */
+export function auctionFromArgs(env: Record<string, string | undefined> = process.env): string {
+  return opt("auction", env.AUCTION ?? "").trim();
 }
 
 /** A search document as the pipeline reads it. The cert is filled in afterwards. */
@@ -226,13 +256,14 @@ async function scanAlt(now: Date, light = false): Promise<{ lots: ScannedLot[]; 
   const say = light ? () => {} : (line: string) => console.log(line);
   const { auctionCycles } = await gqlPublic<{ auctionCycles: Cycle[] | null }>("AuctionCycles",
     `query AuctionCycles { auctionCycles { id name state expiresAt } }`);
-  const { chosen, skipped } = pickCycles(auctionCycles ?? [], nowS);
+  const want = auctionFromArgs();
+  const { chosen, skipped } = pickCycles(auctionCycles ?? [], nowS, want);
   if (chosen.length === 0) throw new Error("No Alt Auction with a future close — nothing to scan.");
   const scheduled = new Map<number, number>();
   for (const c of chosen) scheduled.set(c.id, await scheduledCloseUnixS(c));
   const ends = (c: Cycle) => scheduled.get(c.id) || Math.floor(Date.parse(c.expiresAt ?? "") / 1000) || 0;
-  say(`    ${chosen.length} auction(s) closing within ${AUCTION_WINDOW_DAYS} days: ${chosen.map((c) => `${c.name} (${fmtEastern(ends(c))})`).join(", ")}`);
-  if (skipped.length > 0) say(`    skipping ${skipped.length} later auction(s): ${skipped.map((c) => c.name).join(", ")}`);
+  say(`    scanning ${chosen.length} auction(s)${want ? ` matching "${want}"` : " closing first"}: ${chosen.map((c) => `${c.name} (${fmtEastern(ends(c))})`).join(", ")}`);
+  if (skipped.length > 0) say(`    leaving ${skipped.length} auction(s) that close later: ${skipped.map((c) => `${c.name} (${fmtEastern(ends(c))})`).join(", ")}`);
 
   const key = new SearchKey();
   const lots: ScannedLot[] = [];

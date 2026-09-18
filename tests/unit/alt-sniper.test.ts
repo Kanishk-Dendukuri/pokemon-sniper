@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { ALT_STEPS, BID_INCREMENTS, BID_INPUT_VERIFIED, centsOf, cycleStatus, listingUrl, lotLabel, placeMaxBidsInput } from "@/scripts/alt-bidder";
-import { alt, gradeKeys, pickCycles, toLot } from "@/scripts/alt-sniper";
+import { alt, auctionFromArgs, gradeKeys, pickCycles, toLot } from "@/scripts/alt-sniper";
 import { fanatics } from "@/scripts/fanatics-sniper";
 import { bidAmount, blameOf, incrementAt, nextAffordable } from "@/scripts/sniper-book";
 import { priorityRank, selectCandidates, type ScannedLot } from "@/scripts/sniper-core";
@@ -107,7 +107,7 @@ describe("the Alt scan", () => {
     { id: 3511, name: "Aug 21 - Sep 04, 2026", state: "ENDED", expiresAt: "2026-09-05T01:00:00+00:00" },
   ];
 
-  test("picks the cycle closing this week and skips the two behind it", () => {
+  test("picks the cycle closing first and skips the two behind it", () => {
     const now = Math.floor(Date.parse("2026-09-07T21:00:00Z") / 1000);
     const { chosen, skipped } = pickCycles(cycles, now);
     expect(chosen.map((c) => c.id)).toEqual([3512]);
@@ -117,6 +117,45 @@ describe("the Alt scan", () => {
   test("with nothing inside the week, takes the soonest rather than nothing", () => {
     const now = Math.floor(Date.parse("2026-08-01T00:00:00Z") / 1000);
     expect(pickCycles(cycles, now).chosen.map((c) => c.id)).toEqual([3512]);
+  });
+
+  test("leaves next week's cycle alone on the night this one is in extended bidding", () => {
+    // 9:39 PM ET on the Thursday 3513 closes: it has extended a few minutes
+    // past its 9 PM close, and 3677 is a week out but well inside seven days.
+    const now = Math.floor(Date.parse("2026-09-18T01:39:00Z") / 1000);
+    const extending = cycles.map((c) => (c.id === 3513 ? { ...c, expiresAt: "2026-09-18T01:41:00+00:00" } : c));
+    const { chosen, skipped } = pickCycles(extending, now);
+    expect(chosen.map((c) => c.id)).toEqual([3513]);
+    expect(skipped.map((c) => c.id)).toEqual([3677]);
+  });
+
+  test("takes cycles that close within hours of each other together", () => {
+    const now = Math.floor(Date.parse("2026-09-07T21:00:00Z") / 1000);
+    const alongside = [...cycles, { id: 3999, name: "Twin", state: "LIVE", expiresAt: "2026-09-11T04:00:00+00:00" }];
+    expect(pickCycles(alongside, now).chosen.map((c) => c.id)).toEqual([3512, 3999]);
+  });
+
+  test("--auction picks by name, whatever closes first", () => {
+    const now = Math.floor(Date.parse("2026-09-07T21:00:00Z") / 1000);
+    const { chosen, skipped } = pickCycles(cycles, now, "sep 11");
+    expect(chosen.map((c) => c.id)).toEqual([3677]);
+    expect(skipped.map((c) => c.id)).toEqual([3512, 3513]);
+  });
+
+  test("--auction picks by id, and takes several", () => {
+    const now = Math.floor(Date.parse("2026-09-07T21:00:00Z") / 1000);
+    expect(pickCycles(cycles, now, "3513, 3677").chosen.map((c) => c.id)).toEqual([3513, 3677]);
+  });
+
+  test("--auction matching no open auction stops the run and names the ones there are", () => {
+    const now = Math.floor(Date.parse("2026-09-07T21:00:00Z") / 1000);
+    expect(() => pickCycles(cycles, now, "Oct 02")).toThrow(/no open Alt auction matches/);
+    expect(() => pickCycles(cycles, now, "Oct 02")).toThrow(/Sep 04 - Sep 17, 2026 \(id 3513\)/);
+  });
+
+  test("the auction to scan comes off --auction, else AUCTION, else blank", () => {
+    expect(auctionFromArgs({})).toBe("");
+    expect(auctionFromArgs({ AUCTION: "  Sep 04  " })).toBe("Sep 04");
   });
 
   test("asks for every PSA and CGC grade chased, in Alt's spelling, Pristine included", () => {
