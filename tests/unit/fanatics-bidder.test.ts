@@ -602,6 +602,24 @@ describe("the fire", () => {
     expect(b.placed.every((p) => p.status === "PLANNED")).toBe(true);
   });
 
+  test("the plan says what the fire would take and what it would cost, and changes nothing", () => {
+    const rows = [
+      lot({ listingId: "a", maxHammerCents: 8_000 }),   // $96 all-in
+      lot({ listingId: "b", maxHammerCents: 4_000 }),   // $48
+      lot({ listingId: "c", maxHammerCents: 3_000 }),   // $36
+    ];
+    const b = new BidBook(null, { budgetCents: 9_000, live: true, log: () => {} });
+    const plan = b.plan(rows);
+    expect(plan.picks.map((r) => r.listingId)).toEqual(["b", "c"]);
+    expect(plan.exposureCents).toBe(8_400);
+    expect(plan.beyond).toBe(1);
+    expect(b.placed).toHaveLength(0);
+    expect(b.settled.size).toBe(0);
+    // The same again once a is settled: the ceiling then has nothing beyond it.
+    b.settled.add("a");
+    expect(b.plan(rows).beyond).toBe(0);
+  });
+
   test("the per-card cap counts the picks: three copies go, the fourth waits for an outbid", async () => {
     const KEY = "pikachu|base|58";
     const copies = Array.from({ length: 4 }, (_, i) => lot({ listingId: `copy-${i}`, maxHammerCents: 1_000, maxAllInCents: 1_200, currentBidCents: 500, cardKey: KEY }));

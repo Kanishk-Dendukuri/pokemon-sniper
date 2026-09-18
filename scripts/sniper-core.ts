@@ -159,6 +159,7 @@ import {
   BUYERS_PREMIUM,
   BidBook,
   DEFAULT_BUDGET_DOLLARS,
+  allInCents,
   bidAmount,
   dollars,
   type AuctionState,
@@ -1839,7 +1840,7 @@ function summaryMarkdown(
   rejected: Row[],
   candidates: number,
   scanned: number,
-  opts: { venue: string; csv: string; mode: string; standing: string; chaseList: boolean },
+  opts: { venue: string; csv: string; mode: string; standing: string; chaseList: boolean; held?: boolean },
 ): string {
   const lines = [
     `## ${opts.venue} sniper — ${opts.mode}`,
@@ -1864,7 +1865,12 @@ function summaryMarkdown(
 
   const queue = worthy.filter((r) => r.bid_rank !== "").sort((a, b) => Number(a.bid_rank) - Number(b.bid_rank));
   if (queue.length > 0) {
-    lines.push(`### Next in line`, ``, `The bids the budget would have gone to, in order, had it come free.`, ``,
+    lines.push(
+      opts.held ? `### Held for the fire` : `### Next in line`, ``,
+      opts.held
+        ? `The bids that go on at the fire, in order, as far as the ceiling reaches. Written before the fire and after every re-scan, so this is where things stood at the last look.`
+        : `The bids the ceiling did not reach, in order.`,
+      ``,
       `| # | Lot | Max hammer | Current | Grade | Item |`, `|---|---|---|---|---|---|`);
     for (const r of queue.slice(0, 25)) {
       lines.push(`| ${r.bid_rank} | ${r.lot} | **$${r.max_bid_hammer}** | $${r.current_bid} | ${r.grader} ${r.grade} | [${r.title.slice(0, 60)}](${r.url}) |`);
@@ -2427,6 +2433,83 @@ export async function runSniper(venue: Venue): Promise<void> {
       console.log(`    ${candidates.length - cursor} candidate(s) left unpriced\n`);
     }
 
+    /**
+     * The rows the CSV is made of, with what became of each, and the two
+     * files: the bid list and the summary page. Written at the start of the
+     * hold and after every re-scan as well as at the end, so a run cut off at
+     * the six-hour cap — or read while it is still holding — has a file that
+     * says what it was going to bid on and for how much.
+     *
+     * Sorted the way the fire meets them, so the file reads as the run does:
+     * what was bid on and how it ended, then — in order — what is held for the
+     * fire, or what the ceiling did not reach. Returns how many rows a re-scan
+     * had found past the max, for the funnel.
+     */
+    const writeOutputs = (final: boolean): number => {
+      worthy.sort((a, b) => a.priority - b.priority || Number(b.headroom) - Number(a.headroom));
+      const placedBy = new Map(book.placed.map((b) => [b.listingId, b]));
+      const inheritedBy = new Map(book.inherited.map((b) => [b.listingId, b]));
+      const skippedBy = new Map(book.skipped.map((s) => [s.listingId, s]));
+      // The last write is the outcome, whatever happened: a run the auction
+      // closed on before the fire is not still holding anything.
+      const held = !final && live && !fired;
+      let queue = 0;
+      let pricedOutCount = 0;
+      for (const row of worthy) {
+        const id = row.listing_id;
+        row.bid_rank = "";
+        const bid = placedBy.get(id);
+        if (bid) {
+          row.bid_placed = bid.cents / 100;
+          row.bid_status = bidOutcome(bid);
+          row.final_bid = bid.currentBidCents ? bid.currentBidCents / 100 : "";
+          settle(row, bid);
+          continue;
+        }
+        // A lot the account was already bidding on is left exactly as it was,
+        // and its bid is the account's rather than this run's — so the row says
+        // what is on it without claiming this run put it there.
+        const already = inheritedBy.get(id);
+        if (already) {
+          row.bid_status = `not bid: this account already had ${dollars(already.cents)} on it`;
+          row.final_bid = already.currentBidCents ? already.currentBidCents / 100 : "";
+          settle(row, already);
+          continue;
+        }
+        const skipped = skippedBy.get(id);
+        if (skipped) { row.bid_status = `not bid: ${skipped.reason}`; continue; }
+        const out = pricedOutBy.get(id);
+        if (out) { row.bid_status = `not bid: ${out}`; pricedOutCount++; continue; }
+        if (!toBiddable(row)) { row.bid_status = "not bid: see flags"; continue; }
+        row.bid_rank = ++queue;
+        row.bid_status = held ? "held for the fire" : "next in line";
+      }
+
+      // The one file worth keeping, and the page the Actions summary shows.
+      writeFileSync(join(outDir, csvName), toCsv(worthy));
+      writeFileSync(join(outDir, "summary.md"), summaryMarkdown(worthy, rejected, onChaseList, lots.length,
+        { venue: venue.name, csv: csvName, mode: held ? `${mode} — holding for the fire` : mode, standing: book.standing(), chaseList: venue.chaseList, held }));
+      if (!final) log("written", { held: queue, out: pricedOutCount });
+      return pricedOutCount;
+    };
+
+    /**
+     * What is held for the fire, said in full: one line per lot the ceiling
+     * reaches, in the order the fire takes them, with the max and what the
+     * lot stands at — the same line the fire will print when it bids. The
+     * whole list, not a sample: a run is checked by reading this against the
+     * lots, and a sample is no check.
+     */
+    const sayPlan = () => {
+      const plan = book.plan(pool());
+      console.log(`    held for the fire: ${plan.picks.length} lot(s), ${dollars(plan.exposureCents)} all-in if every one won, under a ${dollars(budgetCents)} ceiling${plan.beyond > 0 ? `; ${plan.beyond} more beyond it` : ""}`);
+      for (const row of plan.picks) {
+        const ours = venue.steps.below(row.maxHammerCents);
+        console.log(`    ○  plan ${dollars(ours)} (${dollars(allInCents(ours))} all-in) on ${row.lot} — current ${dollars(row.currentBidCents)}, ${row.bidCount} bid(s) — ${row.title}\n       ${venue.listingUrl(row.listingId)}`);
+      }
+      log("plan", { held: plan.picks.length, exposureCents: plan.exposureCents, beyond: plan.beyond });
+    };
+
     // 4. Hold. Nothing is bid until the fire: the clock is read, and from
     //    half an hour out the house is re-scanned every few minutes so the run
     //    knows which of its lots the room has already taken past the max.
@@ -2455,19 +2538,31 @@ export async function runSniper(venue: Venue): Promise<void> {
         if (!biddable) continue;
         const lot = byId.get(row.listing_id);
         if (!lot) { unseen++; under++; continue; }
+        const was = row.current_bid;
         row.current_bid = lot.currentBid;
         row.bid_count = lot.bidCount;
         row.headroom = round2(Number(row.max_bid_hammer) - lot.currentBid);
         const why = pricedOut(biddable, { currentBidCents: Math.round(lot.currentBid * 100), bidCount: lot.bidCount }, venue.steps);
-        if (why) { pricedOutBy.set(row.listing_id, `passed the max before the bids went on — ${why}`); out++; } else under++;
+        if (why) {
+          pricedOutBy.set(row.listing_id, `passed the max before the bids went on — ${why}`);
+          out++;
+          console.log(`    –  ${row.lot}: out — ${why} (was $${was} at the last look)\n       ${venue.listingUrl(row.listing_id)}`);
+        } else {
+          under++;
+        }
       }
       console.log(`    ${clock()} ${venue.zoneLabel}  ·  re-scan in ${((Date.now() - started) / 1000).toFixed(0)}s: ${under} lot(s) still under the max, ${out} passed it since the last look${unseen > 0 ? ` (${unseen} not in this scan, kept)` : ""}, ${pricedOutBy.size} out in all`);
       log("rescan", { under, out, unseen, outInAll: pricedOutBy.size });
+      const plan = book.plan(pool());
+      console.log(`    held for the fire: ${plan.picks.length} lot(s), ${dollars(plan.exposureCents)} all-in if every one won${plan.beyond > 0 ? `; ${plan.beyond} beyond the ceiling` : ""}`);
+      writeOutputs(false);
     };
 
     if (live && !auctionClosed && !fired) {
       console.log(`  ── holding  ·  the bids go on at ${fmtLocal(fireAt(), venue.timeZone, venue.zoneLabel)}, ${fireAfterMin} min after extended bidding opens${venue.closesTogether ? ", or the moment the auction reads seconds from its end" : ""}`);
-      console.log(`     ${pool().length} lot(s) priced and held; the house is re-scanned every ${RESCAN_EVERY_S / 60} min from ${RESCAN_FROM_S / 60} min out`);
+      console.log(`     the house is re-scanned every ${RESCAN_EVERY_S / 60} min from ${RESCAN_FROM_S / 60} min out; the bid list and the summary are written now and after every look`);
+      sayPlan();
+      writeOutputs(false);
       let lastRescanMs = 0;
       let lastSpoke = Date.now();
       for (;;) {
@@ -2579,50 +2674,9 @@ export async function runSniper(venue: Venue): Promise<void> {
       });
     }
 
-    // 7. What happened, written onto the rows the CSV is made of.
-    //
-    //    Sorted the way the fire met them, so the file reads as the run did:
-    //    what was bid on and how it ended, then — in order — what the next
-    //    bid would have gone to had the ceiling reached it.
-    worthy.sort((a, b) => a.priority - b.priority || Number(b.headroom) - Number(a.headroom));
-    const placedBy = new Map(book.placed.map((b) => [b.listingId, b]));
-    const inheritedBy = new Map(book.inherited.map((b) => [b.listingId, b]));
-    const skippedBy = new Map(book.skipped.map((s) => [s.listingId, s]));
-    let queue = 0;
-    let pricedOutCount = 0;
-    for (const row of worthy) {
-      const id = row.listing_id;
-      const bid = placedBy.get(id);
-      if (bid) {
-        row.bid_placed = bid.cents / 100;
-        row.bid_status = bidOutcome(bid);
-        row.final_bid = bid.currentBidCents ? bid.currentBidCents / 100 : "";
-        settle(row, bid);
-        continue;
-      }
-      // A lot the account was already bidding on is left exactly as it was,
-      // and its bid is the account's rather than this run's — so the row says
-      // what is on it without claiming this run put it there.
-      const already = inheritedBy.get(id);
-      if (already) {
-        row.bid_status = `not bid: this account already had ${dollars(already.cents)} on it`;
-        row.final_bid = already.currentBidCents ? already.currentBidCents / 100 : "";
-        settle(row, already);
-        continue;
-      }
-      const skipped = skippedBy.get(id);
-      if (skipped) { row.bid_status = `not bid: ${skipped.reason}`; continue; }
-      const out = pricedOutBy.get(id);
-      if (out) { row.bid_status = `not bid: ${out}`; pricedOutCount++; continue; }
-      if (!toBiddable(row)) { row.bid_status = "not bid: see flags"; continue; }
-      row.bid_rank = ++queue;
-      row.bid_status = "next in line";
-    }
-
-    // The one file worth keeping, and the page the Actions summary shows.
-    writeFileSync(join(outDir, csvName), toCsv(worthy));
-    writeFileSync(join(outDir, "summary.md"), summaryMarkdown(worthy, rejected, onChaseList, lots.length,
-      { venue: venue.name, csv: csvName, mode, standing: book.standing(), chaseList: venue.chaseList }));
+    // 7. What happened, written onto the rows the CSV is made of — for the
+    //    last time; the hold wrote the same file at every look.
+    const pricedOutCount = writeOutputs(true);
     log("end", { standing: book.standing(), priced: cursor, worthy: worthy.length });
 
     // The run in one column. The CSV holds the detail; this says where the lots

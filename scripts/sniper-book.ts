@@ -788,30 +788,44 @@ export class BidBook {
    * in fill(), and stop the run the same way once the pass is over: there is
    * nothing down the list for a broken account, however fast it is walked.
    */
-  async fire(pool: Biddable[], opts: { concurrency: number }): Promise<{ picked: number; placed: number; exposureCents: number; auctionClosed: boolean }> {
+  /**
+   * What the fire would put on right now, and for how much: every lot in the
+   * pool the ceiling and the caps allow, best lot first, each pick counted as
+   * a live copy of its card. Pure — nothing is quoted, sent or settled — so
+   * the run can say what it is holding for the fire long before the fire, and
+   * again after every re-scan. `beyond` is what the ceiling did not reach;
+   * `exposureCents` is what the picks would cost all-in if every one won.
+   */
+  plan(pool: Biddable[]): { picks: Biddable[]; exposureCents: number; beyond: number } {
     const caps = this.opts.caps;
     const byCard = new Map<string, number>();
     for (const p of this.placed) {
       if (!p.cardKey || p.status === "OUTBID" || (p.closed && p.status !== "HIGH_BID")) continue;
       byCard.set(p.cardKey, (byCard.get(p.cardKey) ?? 0) + 1);
     }
-    const picked: Biddable[] = [];
+    const picks: Biddable[] = [];
     let free = this.free();
     let exposureCents = 0;
+    let beyond = 0;
     for (const row of pool) {
       if (this.settled.has(row.listingId)) continue;
       const ours = this.opts.steps.below(row.maxHammerCents);
       if (ours <= 0) continue;
+      if (row.cardKey && caps && (byCard.get(row.cardKey) ?? 0) >= caps.perCard) continue;
       const allIn = allInCents(ours);
       // The ceiling: a lot it does not reach is skipped, and a cheaper one
       // further down may still fit, so this is a skip rather than a stop.
-      if (allIn > free) continue;
-      if (row.cardKey && caps && (byCard.get(row.cardKey) ?? 0) >= caps.perCard) continue;
-      picked.push(row);
+      if (allIn > free) { beyond++; continue; }
+      picks.push(row);
       free -= allIn;
       exposureCents += allIn;
       if (row.cardKey) byCard.set(row.cardKey, (byCard.get(row.cardKey) ?? 0) + 1);
     }
+    return { picks, exposureCents, beyond };
+  }
+
+  async fire(pool: Biddable[], opts: { concurrency: number }): Promise<{ picked: number; placed: number; exposureCents: number; auctionClosed: boolean }> {
+    const { picks: picked, exposureCents } = this.plan(pool);
     this.opts.log("fire", { picked: picked.length, exposureCents, ceilingCents: this.opts.budgetCents, live: this.opts.live },
       `    firing ${picked.length} bid(s) — ${dollars(exposureCents)} all-in if every one of them won, under a ${dollars(this.opts.budgetCents)} ceiling`);
     if (picked.length === 0) return { picked: 0, placed: 0, exposureCents, auctionClosed: false };
