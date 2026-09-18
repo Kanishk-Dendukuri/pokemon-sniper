@@ -66,7 +66,7 @@ describe("what no pack can award", () => {
       .toMatch(/^sales median \$6\.5: No pack can award \$6\.50: the ladder starts at \$7\.50$/);
     // The median clears the floor and the bid basis does not: still no.
     expect(unawardableLotReason({ medianDollars: 8, basisDollars: 6.99 }))
-      .toMatch(/^bid basis \(second-lowest sale\) \$6\.99: No pack can award \$6\.99: the ladder starts at \$7\.50$/);
+      .toMatch(/^bid basis \(2nd lowest sale\) \$6\.99: No pack can award \$6\.99: the ladder starts at \$7\.50$/);
   });
 
   test("in the hole between Gaia's jackpot ceiling and Infernal's jackpot floor", () => {

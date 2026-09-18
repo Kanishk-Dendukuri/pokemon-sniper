@@ -22,13 +22,27 @@
 # fires at once rather than hold through the close.
 #
 # The tier table — what to bid on a card by what it is worth — is typed into
-# the run, one line per grader, in dollars of the card's second-lowest recent sale:
+# the run, one line per grader, in dollars of the card's bid basis (the value
+# basis box, the second-lowest of its five recent sales by default):
 # "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%" bids a flat
 # $5 on a card worth $7.50–8, $3 under on one worth $8–10, 85% all-in of one
 # worth $10–90 and 80% of one worth $90–450; under $7.50 and over $450 nothing is
 # bid. The boxes' defaults are the code's own (DEFAULT_TIERS); the sold-report
 # workflow is where a new line is tried against past auctions before it goes
 # here. A line that cannot be read stops the run before anything is scanned.
+#
+# The value basis box is what a card is worth, before any percentage touches
+# it: the sniper looks up the card's recent sales and boils them down to one
+# price, and every share in the tier table multiplies that. "2nd lowest" is the
+# default and what the tables were fitted on — the lowest sale with the worst
+# comp thrown out. "lowest" is the most cautious, "average of the 3 lowest" and
+# "drop the lowest and the highest, average the rest" smooth a noisy card out,
+# "median" and "average" bid near what the card really goes for. The sales-rule
+# box says how many sales are looked at and how old the oldest may be ("5 sales
+# in 60 days"): it gates the lot as well as feeding the basis, so a wider window
+# lets more lots through and prices them off older sales at once. Try a change
+# in the sold-report workflow — it takes the same two boxes — before a table
+# fitted on one basis is bid with another.
 #
 # The budget box is a ceiling, not a target: the most the run may hold at once,
 # all-in. The bids go on down the list, best lot first, as far as it reaches.
@@ -76,13 +90,30 @@ on:
         type: boolean
         default: false
       psa_tiers:
-        description: "PSA tier table, in dollars of the second-lowest recent sale: from-to: flat $N | market - $N | N%"
+        description: "PSA tier table, in dollars of the bid basis (see the value basis box): from-to: flat $N | market - $N | N%"
         type: string
         default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%"
       cgc_tiers:
         description: "CGC tier table, the same way"
         type: string
         default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 77%, $90-450: 70%"
+      value_basis:
+        description: "How the recent sales become the one price the tier tables' percentages multiply"
+        type: choice
+        default: "2nd lowest"
+        options:
+          - "lowest"
+          - "2nd lowest"
+          - "3rd lowest"
+          - "average of the 2 lowest"
+          - "average of the 3 lowest"
+          - "drop the lowest and the highest, average the rest"
+          - "median"
+          - "average"
+      sales_rule:
+        description: "How many recent sales a price is worked from, and how old the oldest of them may be"
+        type: string
+        default: "5 sales in 60 days"
       max_copies_per_card:
         description: "Most lots of one card to hold at once, counted across every grade and both graders"
         type: string
@@ -174,6 +205,12 @@ jobs:
           # Blank means the code's own defaults.
           TIERS_PSA: ${{ inputs.psa_tiers }}
           TIERS_CGC: ${{ inputs.cgc_tiers }}
+          # How a card's price is worked out from its sales: the sales rule —
+          # how many, how recent — and the basis, which of them (or what blend
+          # of them) the tier tables' percentages multiply. Blank means the
+          # code's own defaults: the second-lowest of five sales inside 60 days.
+          VALUE_BASIS: ${{ inputs.value_basis }}
+          SALES_RULE: ${{ inputs.sales_rule }}
           # The per-card cap, the same way. Blank means the code's own default.
           MAX_COPIES_PER_CARD: ${{ inputs.max_copies_per_card }}
           # When the bids go on, in minutes after extended bidding opens.

@@ -22,7 +22,7 @@ import {
   marketPct,
   parallel,
   prettyPattern,
-  SALES_WINDOW_DAYS,
+  salesWindowDays,
   formatTiers,
   marketPrice,
   masterBallAllowed,
@@ -218,7 +218,7 @@ describe("tier table", () => {
 describe("market price", () => {
   const at = (price: number) => ({ price, date: "2026-09-01" });
 
-  test("the second-lowest of the recent sales, not their average and not the lowest", () => {
+  test("by default the second-lowest of the recent sales, not their average and not the lowest", () => {
     const m = marketPrice([60, 64, 70, 72, 74].map(at));
     expect(m.price).toBe(64);
     expect(m.used).toHaveLength(5);
@@ -383,7 +383,7 @@ describe("sales gate", () => {
   const sale = (daysAgo: number) => ({ price: 10, date: new Date(now.getTime() - daysAgo * 86_400_000).toISOString() });
 
   test("needs five sales all inside the last two months", () => {
-    expect(SALES_WINDOW_DAYS).toBe(60);
+    expect(salesWindowDays()).toBe(60);
     expect(salesGate([1, 5, 10, 20, 59].map(sale), now)).toEqual({ ok: true, oldestDays: 59 });
   });
 

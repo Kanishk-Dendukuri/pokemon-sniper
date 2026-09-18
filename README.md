@@ -21,9 +21,9 @@ own GitHub Actions minutes; nothing here reads or writes the app's database.
 `cert-price.ts`, `lib/odds-config.ts` and `lib/price-confidence.ts` are copies
 of files the app repository also has, and were identical on the day of the
 split. When one changes there, it has to change here — with one deliberate
-exception: since 2026-09-17 this copy of `cert-price.ts` prices a bid off the
-second-lowest of the five recent sales, the app's still uses the lowest as
-its floor. Everything else moved and is gone from the app.
+exception: since 2026-09-17 this copy of `cert-price.ts` lets a run choose how
+a bid is priced off the recent sales — the second-lowest of five unless told
+otherwise — where the app's still uses the lowest as its floor. Everything else moved and is gone from the app.
 
 ## Running one
 
@@ -63,10 +63,30 @@ bidding opens, and each house has its own rule:
 unless told — and not a target: how many lots are won is the tier table's
 and the per-card cap's doing.
 
-The tier table's shares multiply the card's second-lowest recent sale (of
-the five Card Uploader returns, all inside 60 days). The lowest until
-2026-09-17: one bad comp on the low side sank the bid on a card the other
-four agreed about.
+The tier table's shares multiply the card's **bid basis**: its recent sales
+boiled down to one price. `--value-basis` (the value basis box) says how, and
+`--sales-rule` says which sales:
+
+| `--value-basis` | the bid basis |
+|---|---|
+| `lowest` | the cheapest of the sales |
+| `2nd lowest` *(default)* | the cheapest with the worst comp thrown out |
+| `3rd lowest` | and so on |
+| `average of the 2 lowest`, `average of the 3 lowest` | the cheap end, smoothed |
+| `drop the lowest and the highest, average the rest` | the trimmed mean |
+| `median`, `average` | near what the card really goes for |
+
+A basis that runs off the end of a short list takes what there is. The default
+is the second-lowest of the five sales Card Uploader returns, all inside 60
+days (`--sales-rule="5 sales in 60 days"`); it was the lowest until 2026-09-17,
+when one bad comp on the low side sank the bid on a card the other four agreed
+about. Market value — what a won lot's price is measured against — stays the
+median of the same sales whatever the basis.
+
+The sold report takes both boxes too, and that is the way to try a basis: run
+it on one, run it again on another, and compare the tables it recommends. A
+tier table fitted on one basis is only right for a sniper run set to the same
+one, so change both together.
 
 ## In Actions
 

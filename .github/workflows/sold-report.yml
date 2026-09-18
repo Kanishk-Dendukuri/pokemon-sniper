@@ -18,6 +18,17 @@
 # against: every band also gets an "as configured" row, so current and best
 # sit side by side. They gate nothing.
 #
+# The value basis and sales-rule boxes are the same two the snipers take, and
+# they decide what the shares on the curve are shares OF: the run boils each
+# card's recent sales down to one price — "2nd lowest" by default — and every
+# share multiplies that. This is the way to try a basis before bidding on it:
+# run the report on "lowest" and again on "average of the 3 lowest" and the
+# recommended tables that come back are what each basis is worth over the same
+# closed auctions. A table recommended here is only right for a sniper run set
+# to the same basis, so change both together or neither. Market value — the
+# yardstick a price paid is measured against — stays the trimmed mean whatever
+# the basis, so the two runs are comparable.
+#
 # The budget box matters. Without one the recommendation is the table that
 # makes the most money, which over the four auctions to 2026-09-11 wanted
 # $10,700 an auction at Fanatics. With one, the rules are chosen together —
@@ -28,8 +39,9 @@
 # The resale rates are the one thing the report cannot work out for itself,
 # and every profit and every recommendation follows from them — rates that
 # are wrong here recommend the wrong table with complete confidence. They are
-# a share of market value, which is the card's five most recent sales with
-# the highest and lowest dropped and the other three averaged.
+# a share of market value, which is the card's most recent sales with the
+# highest and lowest dropped and the rest averaged — the yardstick, not the
+# bid basis.
 #
 # See scripts/sold-report.ts.
 #
@@ -53,13 +65,30 @@ on:
         type: string
         default: "4"
       psa_tiers:
-        description: "PSA tier table to judge the lots under, in dollars of the second-lowest recent sale: from-to: flat $N | market - $N | N%"
+        description: "PSA tier table to judge the lots under, in dollars of the bid basis (see the value basis box): from-to: flat $N | market - $N | N%"
         type: string
         default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%"
       cgc_tiers:
         description: "CGC tier table, the same way"
         type: string
         default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 77%, $90-450: 70%"
+      value_basis:
+        description: "How the recent sales become the one price the shares multiply — the sniper must be run on the same basis"
+        type: choice
+        default: "2nd lowest"
+        options:
+          - "lowest"
+          - "2nd lowest"
+          - "3rd lowest"
+          - "average of the 2 lowest"
+          - "average of the 3 lowest"
+          - "drop the lowest and the highest, average the rest"
+          - "median"
+          - "average"
+      sales_rule:
+        description: "How many recent sales a price is worked from, and how old the oldest of them may be"
+        type: string
+        default: "5 sales in 60 days"
       psa_resale:
         description: "What a PSA card resells for, net, as a share of market value, by what it is worth"
         type: string
@@ -138,6 +167,12 @@ jobs:
           # line: the lines carry "$" and spaces, which a shell would eat.
           TIERS_PSA: ${{ inputs.psa_tiers }}
           TIERS_CGC: ${{ inputs.cgc_tiers }}
+          # How a card's price is worked out from its sales, the same boxes the
+          # snipers take: the sales rule — how many, how recent — and the
+          # basis, which of them the shares multiply. The recommended table
+          # that comes out is only right for a sniper run on the same basis.
+          VALUE_BASIS: ${{ inputs.value_basis }}
+          SALES_RULE: ${{ inputs.sales_rule }}
           RESALE_PSA: ${{ inputs.psa_resale }}
           RESALE_CGC: ${{ inputs.cgc_resale }}
 

@@ -63,18 +63,20 @@
  *      name, set, number, language, population — which is what card_key and the
  *      per-card cap are built from. The batch is deleted afterwards;
  *      a left-over from a crashed run is swept up at the start of the next.
- *   4. Bid maths. What the card is worth is the second-lowest of its five
- *      most recent sales — not the average, which is a bid that only breaks
- *      even, and not the lowest, which one wrong comp could sink.
- *      A lot is worth a bid when the cert resolved, those five sales all fall
- *      inside the last SALES_WINDOW_DAYS, neither that price nor the median
+ *   4. Bid maths. What the card is worth is the basis rule worked on its most
+ *      recent sales — by default the second-lowest of five: not the average,
+ *      which is a bid that only breaks even, and not the lowest, which one
+ *      wrong comp could sink. A run may be given another basis and another
+ *      sales rule (--value-basis, --sales-rule; see ./cert-price).
+ *      A lot is worth a bid when the cert resolved, those sales all fall
+ *      inside the window, neither that price nor the median
  *      of the same sales is a value no pack can award (the sourcing check:
  *      lib/odds-config.ts unawardableRanges — under $7.50, over $16,925, or
  *      in the hole between two tiers), that price sits inside the tier
  *      table, and the max hammer that comes out is above the current bid. No
  *      more than the per-card cap — --max-copies-per-card, 4 by default — of
  *      one card are winning or won in one auction, whatever their grade or
- *      grader; nothing is read from the database. The median of the same five sales is carried along as the
+ *      grader; nothing is read from the database. The median of the same sales is carried along as the
  *      market value a won lot is measured against in the CSV: what was paid
  *      all-in, as a share of it.
  *   5. Anything the cert disagrees with the listing about — grade, year, set,
@@ -107,6 +109,21 @@
  *                         $10-90: 85%, $90-450: 80%" (see TierTable); the
  *                         TIERS_PSA / TIERS_CGC environment variables do the
  *                         same, for a workflow input. Default: DEFAULT_TIERS
+ *   --value-basis="2nd lowest"  how a card's recent sales become the one price
+ *                         the tier tables' percentages multiply: "lowest",
+ *                         "2nd lowest", "3rd lowest", "average of the 2
+ *                         lowest", "average of the 3 lowest", "drop the
+ *                         lowest and the highest, average the rest",
+ *                         "median", "average" (see parseBasis in
+ *                         ./cert-price). The VALUE_BASIS environment variable
+ *                         does the same, for a workflow input. Default:
+ *                         DEFAULT_BASIS, the second-lowest
+ *   --sales-rule="5 sales in 60 days"  how many recent sales a price is
+ *                         worked from and how old the oldest may be; it gates
+ *                         the lot as well as feeding the basis, so a wider
+ *                         window lets more lots through and prices them off
+ *                         older sales. SALES_RULE does the same
+ *                         (default DEFAULT_SALES_RULE)
  *   --max-copies-per-card=4  the most lots of one card to be winning or have
  *                         won at once, counted across every grade and both
  *                         graders; the MAX_COPIES_PER_CARD environment
@@ -173,22 +190,39 @@ import {
 } from "./sniper-book";
 import { unawardableReason } from "@/lib/odds-config";
 import {
-  MIN_SALES,
-  SALES_WINDOW_DAYS,
+  DEFAULT_BASIS,
+  DEFAULT_SALES_RULE,
+  applyBasis,
+  basisRule,
   bidBasis,
+  formatBasis,
+  formatSalesRule,
   marketPrice,
+  minSales,
+  parseBasis,
+  parseSalesRule,
   recentSales,
   salesGate,
   salesMedian,
+  salesRule,
+  salesWindowDays,
+  setBasis,
+  setSalesRule,
+  type BasisRule,
   type Sale,
+  type SalesRule,
 } from "./cert-price";
 
 export { BUYERS_PREMIUM };
 
-// The sales rule and the price that comes out of it are shared with
-// scripts/verify-prices.ts and live in ./cert-price; every caller of the
+// The sales rule, the basis rule and the price that comes out of them live in
+// ./cert-price, which scripts/verify-prices.ts reads too; every caller of the
 // sniper reads them from here, as they always have.
-export { MIN_SALES, SALES_WINDOW_DAYS, bidBasis, marketPrice, recentSales, salesGate, salesMedian, type Sale };
+export {
+  DEFAULT_BASIS, DEFAULT_SALES_RULE, applyBasis, basisRule, bidBasis, formatBasis, formatSalesRule,
+  marketPrice, minSales, parseBasis, parseSalesRule, recentSales, salesGate, salesMedian, salesRule,
+  salesWindowDays, setBasis, setSalesRule, type BasisRule, type Sale, type SalesRule,
+};
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -407,6 +441,45 @@ export function fireAfterFromArgs(defaultMinutes: number, env: Record<string, st
     throw new Error(`--fire-after must be a number of minutes, 0 or more, got "${text}"`);
   }
   return minutes;
+}
+
+/**
+ * How this run works a card's bid basis out of its recent sales: --value-basis,
+ * else the VALUE_BASIS environment variable (the workflow's dropdown), else
+ * the second-lowest of them.
+ *
+ * "lowest", "2nd lowest", "3rd lowest", "average of the 2 lowest", "average of
+ * the 3 lowest", "drop the lowest and the highest, average the rest",
+ * "median", "average" — see parseBasis in ./cert-price for the whole grammar.
+ * A basis that cannot be read stops the run here, before anything is scanned:
+ * a basis nobody meant is a whole auction bid at the wrong price.
+ */
+export function basisFromArgs(env: Record<string, string | undefined> = process.env): BasisRule {
+  const text = opt("value-basis", env.VALUE_BASIS ?? "").trim();
+  if (!text) return DEFAULT_BASIS;
+  try {
+    return parseBasis(text);
+  } catch (err) {
+    throw new Error(`the value basis could not be read: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+/**
+ * How many sales this run prices from and how old the oldest may be:
+ * --sales-rule, else the SALES_RULE environment variable (the workflow box),
+ * else five sales inside sixty days. Written as "5 sales in 60 days".
+ *
+ * The same rule gates the lot and feeds the basis, so widening the window
+ * lets more lots through and prices them off older sales at the same time.
+ */
+export function salesRuleFromArgs(env: Record<string, string | undefined> = process.env): SalesRule {
+  const text = opt("sales-rule", env.SALES_RULE ?? "").trim();
+  if (!text) return DEFAULT_SALES_RULE;
+  try {
+    return parseSalesRule(text);
+  } catch (err) {
+    throw new Error(`the sales rule could not be read: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 /** The moment the bids go on: so many minutes after extended bidding was scheduled to open. */
@@ -829,8 +902,8 @@ export function marketPct(paidAllIn: number, median: number): number | "" {
  * jackpot ceiling and Infernal's jackpot floor. A slab worth a value in a hole
  * would sit in the vault unawardable, so it is not bought. Two figures are
  * asked about: the sales median, which stands in for the appraisal the card
- * would be given once imported, and the bid basis — the second-lowest recent sale —
- * which is what the bid is priced from. Either one in a hole fails the lot,
+ * would be given once imported, and the bid basis — the recent sale, or blend of
+ * them, this run's --value-basis picks out — which is what the bid is priced from. Either one in a hole fails the lot,
  * whatever tier table the run was given. Dollars are rounded to whole cents
  * before the ladder is asked.
  *
@@ -839,7 +912,7 @@ export function marketPct(paidAllIn: number, median: number): number | "" {
 export function unawardableLotReason(lot: { medianDollars: number | null; basisDollars: number | null }): string | null {
   const figures: [string, number | null][] = [
     ["sales median", lot.medianDollars],
-    ["bid basis (second-lowest sale)", lot.basisDollars],
+    [`bid basis (${formatBasis()} sale)`, lot.basisDollars],
   ];
   for (const [figure, value] of figures) {
     if (value === null || !Number.isFinite(value)) continue;
@@ -1606,9 +1679,9 @@ export type Row = {
   grader: string;
   grade: string;
   cert: string;
-  /** The second-lowest of the last five sales: what the bid is worked out from. */
+  /** The basis rule worked on the recent sales: what the bid is worked out from. */
   market_price: number | "";
-  /** The median of the same five: what the card goes for. */
+  /** The median of the same sales: what the card goes for. */
   sales_median: number | "";
   tier_rule: string;
   max_bid_hammer: number | "";
@@ -1848,6 +1921,9 @@ function summaryMarkdown(
     `## ${opts.venue} sniper — ${opts.mode}`,
     ``,
     `- ${scanned} live PSA/CGC 7–10 Pokémon lots scanned, ${candidates} ${opts.chaseList ? "on the chase list" : "candidate(s) — every lot is, here"}, ${worthy.length} worth a bid, ${rejected.length} rejected`,
+    // What every max bid on this page was worked out from, so a page read
+    // weeks later says which basis it was bid on.
+    `- priced off the ${formatBasis()} of ${formatSalesRule()}; the tier tables' shares multiply that`,
     `- ${opts.standing}`,
     ``,
   ];
@@ -2100,6 +2176,8 @@ export async function runSniper(venue: Venue): Promise<void> {
   // a run that should not start.
   setTierTable(tiersFromArgs());
   setMaxCopiesPerCard(maxCopiesFromArgs());
+  setSalesRule(salesRuleFromArgs());
+  setBasis(basisFromArgs());
   const fireAfterMin = fireAfterFromArgs(venue.fireAfterMinutes);
 
   const now = new Date();
@@ -2124,7 +2202,8 @@ export async function runSniper(venue: Venue): Promise<void> {
   console.log(`    batch        ${batchSize} cert(s) priced per round, ${concurrency} at a time; every candidate is priced`);
   for (const grader of GRADERS) console.log(`    tiers ${grader}    ${formatTiers(tierTable()[grader])}`);
   console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader`);
-  console.log(`    sales rule   ${MIN_SALES} sales, every one inside the last ${SALES_WINDOW_DAYS} days`);
+  console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
+  console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);
   if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
   if (wantEmail) console.log(`    account      ${wantEmail}`);
   console.log();
