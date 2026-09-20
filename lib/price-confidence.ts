@@ -36,6 +36,12 @@
  * year — the rule this was asked for — and each is a knob on
  * `ConfidenceRules` for when the queue says otherwise.
  *
+ * The sales also price the card outright when they are fresh enough to
+ * (`priceFromRecentSales`, owner rule 2026-09-17): five sales all inside the
+ * last 60 days is a market with an opinion, and the average of the middle
+ * three — the highest and the lowest dropped — is a better number than an ask
+ * somebody filled in. Anything short of that and the Alt Value stands.
+ *
  * Pure on purpose — no database, no server-only import — so the import script
  * and the admin page decide with the same function.
  */
@@ -170,6 +176,78 @@ export function median(values: number[]): number | null {
   if (sorted.length === 0) return null;
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid] : round2((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+/**
+ * How fresh the newest five sales all have to be before they price the card
+ * themselves rather than merely check the Alt Value.
+ */
+export const SALES_PRICE_WINDOW_DAYS = 60;
+
+/** How many sales inside that window it takes. Card Uploader returns five at most. */
+export const SALES_PRICE_MIN_SALES = 5;
+
+export type SalesPriceRules = {
+  windowDays: number;
+  minSales: number;
+};
+
+export const DEFAULT_SALES_PRICE_RULES: SalesPriceRules = {
+  windowDays: SALES_PRICE_WINDOW_DAYS,
+  minSales: SALES_PRICE_MIN_SALES,
+};
+
+/** A price drawn from the sales themselves, and the arithmetic behind it. */
+export type SalesPrice = {
+  /** The average of the sales that were kept, to the cent. */
+  price: number;
+  /** The sales that were averaged, lowest first. */
+  averaged: number[];
+  /** The highest and the lowest sale, which were set aside. */
+  dropped: { low: number; high: number };
+  /** ISO dates of the oldest and newest sale that qualified. */
+  oldestSale: string;
+  newestSale: string;
+  windowDays: number;
+};
+
+/**
+ * The price the recent sales put on the card, or null when they cannot.
+ *
+ * Only the newest `minSales` sales are looked at, and every one of them has to
+ * fall inside `windowDays` of `now` — one older sale among five means the
+ * market has not spoken five times lately, and the Alt Value stands. When they
+ * qualify, the highest and the lowest are set aside (the odd auction, the
+ * lucky best offer) and the rest are averaged.
+ *
+ * `now` is when the comps were pulled, for the same reason the confidence
+ * check measures from it: a replayed export is judged in its own window.
+ */
+export function priceFromRecentSales(
+  comps: CertComps | null | undefined,
+  now: Date = comps ? new Date(comps.fetchedAt) : new Date(),
+  rules: SalesPriceRules = DEFAULT_SALES_PRICE_RULES,
+): SalesPrice | null {
+  if (!comps || rules.minSales < 3) return null;
+  if (Number.isNaN(now.getTime())) now = new Date();
+
+  // usableSales caps at MAX_SALES_CONSIDERED; a bar above that can never be met.
+  const recent = usableSales(comps.sales, now, rules.windowDays).slice(0, rules.minSales);
+  if (recent.length < rules.minSales) return null;
+
+  const prices = recent.map((s) => s.price).sort((a, b) => a - b);
+  const averaged = prices.slice(1, -1);
+  const price = round2(averaged.reduce((sum, p) => sum + p, 0) / averaged.length);
+  if (!Number.isFinite(price) || price <= 0) return null;
+
+  return {
+    price,
+    averaged,
+    dropped: { low: prices[0], high: prices[prices.length - 1] },
+    oldestSale: recent[recent.length - 1].date,
+    newestSale: recent[0].date,
+    windowDays: rules.windowDays,
+  };
 }
 
 /** Whether `price` sits outside the tolerance of `reference`, by enough dollars to matter. */

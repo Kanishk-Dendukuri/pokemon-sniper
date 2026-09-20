@@ -5,8 +5,11 @@ import {
   MIN_CONFIDENT_SALES,
   MIN_DISAGREEMENT_DOLLARS,
   REFERENCE_TOLERANCE,
+  SALES_PRICE_MIN_SALES,
+  SALES_PRICE_WINDOW_DAYS,
   assessPriceConfidence,
   median,
+  priceFromRecentSales,
   usableSales,
   type CertComps,
   type Sale,
@@ -231,6 +234,84 @@ describe("usableSales", () => {
     const sales = Array.from({ length: 8 }, (_, i) => ({ price: 10 + i, date: `2026-08-${10 + i}T00:00:00Z` }));
     expect(usableSales(sales, NOW)).toHaveLength(5);
     expect(usableSales(sales, NOW)[0].price).toBe(17);
+  });
+});
+
+/**
+ * The owner's rule of 2026-09-17: five sales all inside 60 days price the
+ * card themselves — drop the highest and the lowest, average the rest — and
+ * anything short of that leaves the Alt Value standing.
+ */
+describe("priceFromRecentSales", () => {
+  test("five fresh sales price the card off the middle three", () => {
+    // Tynamo, pulled 2026-09-09: sales from Aug 10 to Sep 1, all inside 60 days.
+    // Sorted $14.50, $15, $20, $23.67, $28 — the ends go, (15 + 20 + 23.67) / 3.
+    const priced = priceFromRecentSales(comps({ sales: TYNAMO, altValue: 22 }));
+    expect(priced).toMatchObject({
+      price: 19.56,
+      averaged: [15, 20, 23.67],
+      dropped: { low: 14.5, high: 28 },
+      newestSale: "2026-09-01T23:53:30.000Z",
+      oldestSale: "2026-08-10T15:18:20.000Z",
+      windowDays: SALES_PRICE_WINDOW_DAYS,
+    });
+  });
+
+  test("one of the five being older than the window leaves the Alt Value standing", () => {
+    // The Zekrom: three sales in August, two from April and May.
+    expect(priceFromRecentSales(comps({ sales: ZEKROM }))).toBeNull();
+  });
+
+  test("four fresh sales are not five", () => {
+    expect(priceFromRecentSales(comps({ sales: TYNAMO.slice(0, 4) }))).toBeNull();
+    expect(priceFromRecentSales(comps({ sales: [] }))).toBeNull();
+  });
+
+  test("the window is the one the constant advertises, to the millisecond", () => {
+    const edge = (offsetMs: number) => [
+      ...TYNAMO.slice(0, 4),
+      { price: 14.5, date: new Date(NOW.getTime() - SALES_PRICE_WINDOW_DAYS * 86_400_000 + offsetMs).toISOString() },
+    ];
+    expect(priceFromRecentSales(comps({ sales: edge(0) }))?.price).toBe(19.56);
+    expect(priceFromRecentSales(comps({ sales: edge(-1) }))).toBeNull();
+  });
+
+  test("only the newest five count when Card Uploader hands back more", () => {
+    // Six sales, all fresh: the oldest ($9) is not looked at, so the five are
+    // $10–$14 and the middle three average $12.
+    const sales = [9, 10, 11, 12, 13, 14].map((price, i) => ({ price, date: `2026-08-${10 + i}T00:00:00Z` }));
+    const priced = priceFromRecentSales(comps({ sales }));
+    expect(priced?.price).toBe(12);
+    expect(priced?.dropped).toEqual({ low: 10, high: 14 });
+    expect(SALES_PRICE_MIN_SALES).toBe(5);
+  });
+
+  test("a sale without a price, or dated in the future, does not count towards five", () => {
+    const sales: Sale[] = [
+      ...TYNAMO.slice(0, 4),
+      { price: 0, date: "2026-09-02T00:00:00Z" },
+      { price: 30, date: "2027-01-01T00:00:00Z" },
+    ];
+    expect(priceFromRecentSales(comps({ sales }))).toBeNull();
+  });
+
+  test("the window is measured from when the comps were pulled", () => {
+    const later = comps({ sales: TYNAMO, fetchedAt: "2027-09-09T00:00:00Z" });
+    expect(priceFromRecentSales(later)).toBeNull();
+    expect(priceFromRecentSales(later, NOW)?.price).toBe(19.56);
+  });
+
+  test("no comps, no opinion", () => {
+    expect(priceFromRecentSales(null)).toBeNull();
+    expect(priceFromRecentSales(undefined)).toBeNull();
+  });
+
+  test("the bars are knobs", () => {
+    // Loosened to a year, the Zekrom's five qualify: $77, $276, $417, $830, $938 → (276 + 417 + 830) / 3.
+    const priced = priceFromRecentSales(comps({ sales: ZEKROM }), undefined, { windowDays: 365, minSales: 5 });
+    expect(priced?.price).toBe(507.67);
+    // Fewer than three sales leaves nothing to average once the ends are dropped.
+    expect(priceFromRecentSales(comps({ sales: TYNAMO }), undefined, { windowDays: 60, minSales: 2 })).toBeNull();
   });
 });
 
