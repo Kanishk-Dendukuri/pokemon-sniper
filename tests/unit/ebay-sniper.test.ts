@@ -339,9 +339,13 @@ describe("what eBay's pages say", () => {
     expect(readGreeting("Sign in or register")).toBe("");
   });
 
-  test("a live session is refused until the bid flow is verified", async () => {
-    expect(BID_FLOW_VERIFIED).toBe(false);
-    await expect(openEbay({ live: true, outDir: "." })).rejects.toThrow(/switched off in code/);
+  test("the bid flow has been walked on a real listing", () => {
+    // Rehearsed 2026-09-20 on listing 800672965889: the max was typed, the
+    // Bid button came alive and was not clicked. Set this back to false if
+    // eBay's layer changes, and rehearse again before setting it true. There
+    // is no openEbay() here on purpose — with the gate open it would launch a
+    // browser rather than refuse, and that is not a unit test's business.
+    expect(BID_FLOW_VERIFIED).toBe(true);
   });
 });
 

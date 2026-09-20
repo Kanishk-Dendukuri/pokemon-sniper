@@ -44,13 +44,61 @@ export const SESSION_DIR = ".ebay-session";
 
 /**
  * Whether the bid flow below has been checked against eBay's real bid layer.
- * Flip to true only after a --rehearse has walked a real listing to Confirm
- * and every step matched. Until then --live is refused in openEbay().
+ *
+ * Walked on 2026-09-20, against listing 800672965889 — a $0.99 CGC slab with
+ * no bids and three days left — and the flow below was rewritten around what
+ * it found rather than what was guessed:
+ *
+ *   - The layer is not a role=dialog of its own. Scoping to the first one
+ *     found eBay's image gallery, and "the first text input" under it was
+ *     eBay's own search box, so the max was being typed into the wrong place
+ *     entirely.
+ *   - There is no review step and no Confirm button. The layer says it in as
+ *     many words — "By clicking Bid, you authorize eBay to bid up to your max
+ *     bid" — so Bid is the commit, and the preparation ends one click short
+ *     of it.
+ *   - Beside it sit "Bid $1", "Bid $3" and "Bid $4", which bid their own
+ *     amount. None of the four has an id or a test id, so the commit is
+ *     matched on its exact name and nothing else.
+ *   - An account with no card on file gets a different layer, with no max box
+ *     at all. That is now told apart from the payment-preferences panel the
+ *     ordinary layer carries.
+ *
+ * The rehearsal ended with $1.00 in the box and the Bid button live, unclicked
+ * and the listing still at 0 bids. Re-run --rehearse and read it again if
+ * eBay's layer changes; flip this back to false in the meantime.
  */
-export const BID_FLOW_VERIFIED = false;
+export const BID_FLOW_VERIFIED = true;
 
 const PAGE_TIMEOUT_MS = 45_000;
 const STEP_TIMEOUT_MS = 20_000;
+/**
+ * The "Place bid" button on an item page. eBay gives it a stable id, which is
+ * worth using: the page also carries a "Place bid" heading on the layer it
+ * opens, and the id cannot be confused with it.
+ */
+const PLACE_BID_BUTTON = "#bidBtn_btn";
+/**
+ * The max-bid box in the layer.
+ *
+ * Named, not positional: "the first text input on the page" is eBay's own
+ * search box, and the layer is not a role=dialog of its own — the page
+ * carries several of those, the image gallery among them, so scoping to the
+ * first dialog finds the wrong thing entirely.
+ *
+ * eBay draws two of these, one per layout — BidInputStack and
+ * BidInputDefault — and only one is ever on screen, so the match is narrowed
+ * by :visible. The ids are CSS-module names with a build hash on the end
+ * (BidInputDefault-module__bidInputTextbox__51WbB), which changes whenever
+ * eBay rebuilds; the middle of the name does not, so that is what is matched.
+ */
+const MAX_BID_BOX = 'input[id*="bidInputTextbox" i]:visible, input[type="tel"].textbox__control:visible';
+/**
+ * The button that commits. Matched on its exact name, because the quick-bid
+ * buttons beside it are called "Bid $1", "Bid $3", "Bid $4" and bid their own
+ * amount rather than ours. None of the four carries an id or a test id.
+ */
+const COMMIT_NAME = /^bid$/i;
 const MANUAL_LOGIN_TIMEOUT_MS = 10 * 60_000;
 /** How long Confirm is given to answer with a standing. */
 const CONFIRM_ANSWER_TIMEOUT_MS = 15_000;
@@ -206,8 +254,12 @@ export class EbaySession {
     try {
       await page.goto(itemUrl(row.listingId), { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT_MS });
 
-      // 1. "Place bid" on the item page opens the bid layer.
-      const placeBid = page.getByRole("link", { name: /place bid/i }).or(page.getByRole("button", { name: /place bid/i })).first();
+      // 1. "Place bid" on the item page opens the bid layer. eBay gives that
+      //    button a stable id; the name is the fallback.
+      const placeBid = page.locator(PLACE_BID_BUTTON)
+        .or(page.getByRole("button", { name: /^place bid$/i }))
+        .or(page.getByRole("link", { name: /^place bid$/i }))
+        .first();
       try {
         await placeBid.click({ timeout: STEP_TIMEOUT_MS });
       } catch {
@@ -218,42 +270,54 @@ export class EbaySession {
         throw new Error(`no "Place bid" control on the item page — ${shot}\n       ${await this.controls(page)}`);
       }
 
-      // 2. The bid layer: a dialog with one text box for the max.
-      const dialog = page.getByRole("dialog").first();
-      const scope = (await dialog.count().catch(() => 0)) > 0 ? dialog : page;
-      const input = scope.locator('input[type="text"], input[type="number"], input[type="tel"], input[inputmode="decimal"]').first();
+      // 2. The layer, which is the max box being there. An account with no
+      //    card on file gets a different layer — one that asks for the card
+      //    and has no max box at all — so that is what its absence is
+      //    checked against. ("Payment preferences" on its own means nothing:
+      //    the ordinary bid layer carries a panel by that name, listing the
+      //    card a winning bid would be charged to.)
+      const maxBox = page.locator(MAX_BID_BOX).first();
       try {
-        await input.waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
-      } catch {
-        const shot = await this.shot(page, `prepare-${tag}-2-layer`);
-        throw new Error(`the bid layer drew no amount box — ${shot}\n       ${await this.controls(page)}`);
-      }
-      await input.fill("");
-      await input.fill((cents / 100).toFixed(2));
-
-      // 3. "Bid" / "Review bid" takes it to the review step, which is where
-      //    the Confirm button lives. Some layers go straight to Confirm.
-      const confirm = scope.getByRole("button", { name: /confirm bid/i }).first();
-      const review = scope.getByRole("button", { name: /^(?:bid|review(?: bid)?|place bid|continue)$/i }).first();
-      if ((await confirm.count().catch(() => 0)) === 0 || !(await confirm.isVisible().catch(() => false))) {
-        try {
-          await review.click({ timeout: STEP_TIMEOUT_MS });
-        } catch {
-          const shot = await this.shot(page, `prepare-${tag}-3-review`);
-          throw new Error(`no Bid / Review bid button in the layer — ${shot}\n       ${await this.controls(page)}`);
-        }
-      }
-      try {
-        await confirm.waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+        await maxBox.waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
       } catch {
         const text = await this.bodyText(page);
-        const shot = await this.shot(page, `prepare-${tag}-4-confirm`);
+        if (/provide your payment and shipping details|select a payment method/i.test(text)) {
+          const shot = await this.shot(page, `prepare-${tag}-2-payment`);
+          throw new Error(
+            "eBay wants a payment method on the account before it will take a bid — it drew the payment layer " +
+            `instead of the bid layer. Add one at ebay.com under Account settings, then this works. (${shot})`);
+        }
+        const shot = await this.shot(page, `prepare-${tag}-2-layer`);
+        throw new Error(`the bid layer drew no max-bid box — ${shot}\n       ${await this.controls(page)}`);
+      }
+
+      // 3. The max bid. Not the quick-bid buttons beside it — "Bid $1",
+      //    "Bid $3", "Bid $4" — which bid that amount rather than ours.
+      await maxBox.fill("");
+      await maxBox.fill((cents / 100).toFixed(2));
+
+      // 4. "Bid" commits: the layer says so in as many words ("By clicking
+      //    Bid, you are committing to buy this item if you are the winning
+      //    bidder"), and there is no review step between. So the preparation
+      //    ends here, with the amount typed and the button untouched, and the
+      //    fire is that one click. The name is matched exactly, because "Bid
+      //    $4" starts with the same word and means something else.
+      const commit = page.getByRole("button", { name: COMMIT_NAME }).first();
+      try {
+        await commit.waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS });
+      } catch {
+        const shot = await this.shot(page, `prepare-${tag}-3-commit`);
+        throw new Error(`no Bid button in the layer — ${shot}\n       ${await this.controls(page)}`);
+      }
+      if (!(await commit.isEnabled().catch(() => false))) {
+        const text = await this.bodyText(page);
+        const shot = await this.shot(page, `prepare-${tag}-3-commit`);
         const answer = readBidAnswer(text);
-        if (answer === "refused") throw new Error(`the layer refused the amount before Confirm: ${text.replace(/\s+/g, " ").slice(0, 160)} — ${shot}`);
-        throw new Error(`no Confirm bid button after the review step — ${shot}\n       ${await this.controls(page)}`);
+        if (answer === "refused") throw new Error(`the layer refused ${dollars(cents)}: ${text.replace(/\s+/g, " ").slice(0, 160)} — ${shot}`);
+        throw new Error(`the Bid button stayed disabled with ${dollars(cents)} typed — the amount may be under the minimum (${shot})`);
       }
       await this.shot(page, `prepare-${tag}-ready`);
-      return { row, cents, page, confirm, preparedAtMs: Date.now() };
+      return { row, cents, page, confirm: commit, preparedAtMs: Date.now() };
     } catch (err) {
       this.open.delete(page);
       await page.close().catch(() => {});
@@ -267,6 +331,13 @@ export class EbaySession {
     withinMax(cents, row);
     try {
       await prepared.confirm.click({ timeout: 5_000 });
+      // The layer commits on that click. Some listings draw one more step
+      // behind it — a "Confirm bid" on a high amount — and the bid is not in
+      // until that is clicked too, so it is taken if it appears.
+      const second = page.getByRole("button", { name: /^confirm(?: bid)?$/i }).first();
+      if (await second.isVisible({ timeout: 2_000 }).catch(() => false)) {
+        await second.click({ timeout: 5_000 }).catch(() => {});
+      }
       // The layer answers in place; give it a moment, then read the words.
       const deadline = Date.now() + CONFIRM_ANSWER_TIMEOUT_MS;
       let text = "";
