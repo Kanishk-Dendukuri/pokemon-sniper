@@ -1,14 +1,31 @@
 # eBay sniper: scan the sellers' live auctions, price what is worth a bid, and
 # say what it would bid — on this runner it never bids.
 #
-# The eBay sniper's real home is the PC it runs on round the clock: the bid
-# goes through a signed-in browser (eBay's bidding API is closed to new
-# applications and its licence forbids a sniper outright), and a hosted runner
-# has no such session and no six-hour-plus life to wait out a close in. So this
-# workflow is the planning half only — one scan, prices, and the list of lots
-# it would have bid on, as a CSV. --live is not offered here and the code
-# refuses it without a rehearsed bid flow anyway. See the README's eBay section
-# for the run that does bid.
+# The eBay sniper's real home is the PC it runs on round the clock. This
+# workflow is for trying it from here: one scan, the prices, and the list of
+# lots it would bid on — and, with the live box ticked and a session pasted
+# in, the bids themselves.
+#
+# Three things to know before ticking that box.
+#
+# The bid goes through a signed-in browser, because eBay's bidding API is
+# closed to new applications and its licence forbids a sniper outright. A
+# runner has no session of its own, so one is exported from the machine that
+# signed in: npm run sniper:ebay -- --export-session prints a line to paste
+# into the session box. eBay ties a sign-in to the machine it was made on as
+# well as to the cookie, and a session presented from a datacenter address is
+# often challenged — if that happens it happens mid-bid, seconds before the
+# close, and the lot is lost. The PC does not have this problem.
+#
+# The run keeps its state — what is scheduled, what is bid on, what is won and
+# what the budget has left — in a file, and a runner starts empty. It is
+# cached between runs below, but a cache is not a disk: if it misses, the run
+# forgets what it won and the budget ceiling stops meaning anything. Set the
+# win limit and a small budget when bidding from here.
+#
+# A job stops at six hours. eBay closes hard, with no extended bidding, so a
+# run only has to live as long as the lots it armed — but anything closing
+# after the job ends is simply missed.
 #
 # What it needs, as repository secrets: EBAY_CLIENT_ID and EBAY_CLIENT_SECRET
 # (a developer.ebay.com production keyset — the sandbox keys will not do), the
@@ -35,6 +52,14 @@ name: eBay sniper
 on:
   workflow_dispatch:
     inputs:
+      live:
+        description: "Place real bids (unticked: plan only — scans, prices, says what it would bid, sends nothing)"
+        type: boolean
+        default: false
+      token:
+        description: "eBay session token (blank: the EBAY_SESSION_STATE secret). npm run sniper:ebay -- --export-session prints one"
+        type: string
+        default: ""
       zip:
         description: "Postcode the cards ship to, five digits — REQUIRED: eBay refuses the Authenticity Guarantee filter without one, and postage is quoted to it"
         type: string
@@ -51,10 +76,6 @@ on:
         description: "eBay usernames bought from guaranteed or not, comma separated"
         type: string
         default: "zandgemporium,ryans_cardhouse,probstein123,psa"
-      sellers_only:
-        description: "Buy from the sellers above and nobody else (unticked: also every Pokémon auction under Authenticity Guarantee, whoever sells it)"
-        type: boolean
-        default: false
       max_wins:
         description: "Lots to win before the run is over; 0 is as many as the budget stretches to"
         type: string
@@ -78,26 +99,32 @@ on:
           - "drop the lowest and the highest, average the rest"
           - "median"
           - "average"
-      sales_rule:
-        description: "How many recent sales are looked at and how old the oldest may be, e.g. 5 sales in 60 days"
-        type: string
-        default: ""
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # One scan: the search, the listings read, the prices, the maths. No close
-    # is waited out here, so this is generous rather than long.
-    timeout-minutes: 60
+    # A plan is one scan. A live run waits out the closes it armed, so it is
+    # given the full 360 minutes a hosted runner allows.
+    timeout-minutes: 360
 
     steps:
-      - name: Check the keys
+      # A typed-in session is not a secret as far as Actions is concerned, so
+      # it is masked here before anything can echo it, and a live run with no
+      # way in is stopped now rather than after a scan.
+      - name: Check the keys and the way in to eBay
         env:
           ID: ${{ secrets.EBAY_CLIENT_ID }}
           SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+          TYPED: ${{ inputs.token }}
+          STORED: ${{ secrets.EBAY_SESSION_STATE }}
         run: |
+          if [ -n "$TYPED" ]; then echo "::add-mask::$TYPED"; fi
+          if [ "${{ inputs.live }}" = "true" ] && [ -z "$TYPED" ] && [ -z "$STORED" ]; then
+            echo "::error::A live run needs an eBay session. On the signed-in machine: npm run sniper:ebay -- --login, then npm run sniper:ebay -- --export-session — paste the line into the session box, or store it as the EBAY_SESSION_STATE secret."
+            exit 1
+          fi
           if [ -z "$ID" ] || [ -z "$SECRET" ]; then
             echo "::error::Set the EBAY_CLIENT_ID and EBAY_CLIENT_SECRET repository secrets — a developer.ebay.com production keyset."
             exit 1
@@ -115,14 +142,16 @@ jobs:
 
       - run: npm ci
 
-      # The cert number is read off the slab photograph, and that is
-      # Tesseract. Ubuntu runners do not carry it.
-      - name: Install Tesseract
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+      # Tesseract reads the cert number off the slab photograph. Xvfb is for
+      # the bid: eBay serves a headless browser a different page, so the
+      # browser runs headed against a virtual display rather than headless.
+      # Ubuntu runners carry neither.
+      - name: Install Tesseract and a virtual display
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr xvfb
 
-      # Card Uploader is a browser session, so the scan needs Chromium even
-      # though no bid is placed. Cached on the lock file, as the other snipers
-      # do it.
+      # Card Uploader is a browser session, so even a plan needs Chromium; a
+      # live run needs it twice over, since the bid goes through a browser
+      # too. Cached on the lock file, as the other snipers do it.
       - name: Cache Playwright's Chromium
         id: playwright
         uses: actions/cache@v4
@@ -138,10 +167,23 @@ jobs:
       # what the sniper would do, and a dispatch left running should not be
       # able to spend without limit on reading labels. The PC run, which is
       # the one that actually bids, takes --ocr-per-day on the command line.
+      # What the run knows: scheduled lots, bids in flight, what was won and
+      # what the budget has left. A runner starts empty, so it is carried
+      # between runs here. A cache is not a disk — on a miss the run forgets
+      # what it won, which is why a live run wants a win limit and a small
+      # budget.
+      - name: Carry the run's state between runs
+        uses: actions/cache@v4
+        with:
+          path: ebay-sniper-runs
+          key: ebay-state-${{ github.run_id }}
+          restore-keys: ebay-state-
+
       - name: Scan and price
         run: >-
+          xvfb-run -a --server-args="-screen 0 1400x1000x24"
           npm run sniper:ebay --
-          --once
+          ${{ inputs.live && '--live' || '--once' }}
           --budget=${{ inputs.budget || '10000' }}
           --ocr-before=${{ inputs.ocr_before || '240' }}
           --max-wins=${{ inputs.max_wins || '0' }}
@@ -152,17 +194,18 @@ jobs:
           # Where postage is worked out to. Blank leaves calculated rates
           # unpriced and the assumption above stands in for them.
           EBAY_ZIP: ${{ inputs.zip }}
+          # The signed-in session, for a runner that has none of its own.
+          # Typed into the run wins over the stored secret.
+          EBAY_SESSION_STATE: ${{ inputs.token || secrets.EBAY_SESSION_STATE }}
           CARDUPLOADER_EMAIL: ${{ secrets.CARDUPLOADER_EMAIL }}
           CARDUPLOADER_PASSWORD: ${{ secrets.CARDUPLOADER_PASSWORD }}
           # Through the environment rather than the command line: these carry
           # "$", commas and spaces, which a shell would eat. Blank means the
           # code's own defaults.
           SELLERS: ${{ inputs.sellers }}
-          SELLERS_ONLY: ${{ inputs.sellers_only }}
           TIERS_PSA: ${{ inputs.psa_tiers }}
           TIERS_CGC: ${{ inputs.cgc_tiers }}
           VALUE_BASIS: ${{ inputs.value_basis }}
-          SALES_RULE: ${{ inputs.sales_rule }}
 
       # Every listing the scan looked at: what it is worth, what postage it
       # charges, what the run would have bid, and why anything was passed over.

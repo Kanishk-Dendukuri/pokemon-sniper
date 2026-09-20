@@ -105,11 +105,11 @@ one, so change both together.
 The third sniper is a different shape. Fanatics and Alt close one auction a
 week and the run is one evening; eBay is a stream of auctions from a few
 chosen sellers, each ending on its own fixed clock with no extension, so
-`sniper:ebay` is a daemon that runs all day on the PC: a hosted runner stops
-at six hours and has no signed-in eBay session, so bidding happens there and
-nowhere else. `ebay-sniper.yml` runs the planning half in Actions — one scan,
-the prices, and the list of lots it would have bid on — and that is where the
-postcode postage is quoted to is a box on the form.
+`sniper:ebay` is a daemon that runs all day on the PC, which is where it
+belongs: a residential address, a session that stays warm, state on a real
+disk and no six-hour ceiling. `ebay-sniper.yml` runs it from Actions for a
+look — a plan by default, or real bids with the live box ticked and a session
+pasted in. See **From Actions** below for what that costs you.
 
 What it does, every `--scan-every` minutes (10 by default): asks eBay for
 every live auction the sellers have in the trading-card category, reads the
@@ -249,7 +249,7 @@ listing passed over, why.
 Flags, beyond the shared ones: `--fire-before=5`, `--arm-before=60` (when the
 page is opened and walked to Confirm), `--scan-every=10`, `--sellers`,
 `--psa-grades=1-10`, `--cgc-grades=7-10`, `--new-set-months=6`, `--once`,
-`--max-wins=0`, `--sellers-only`, `--ocr-before=120`, `--ocr-per-day=1500`,
+`--max-wins=0`, `--sellers-only`, `--export-session`, `--ocr-before=120`, `--ocr-per-day=1500`,
 `--no-ocr`,
 `--zip=<postcode>` (required), `--shipping-unknown=15`,
 `--headless` (not advised: eBay draws a headless browser a different page),
@@ -265,10 +265,32 @@ count, and a scan is skipped near the allowance so the fires never are.
 
 Four workflows, all started by hand, never on a schedule:
 `fanatics-sniper.yml`, `alt-sniper.yml`, `ebay-sniper.yml`, `sold-report.yml`.
-The eBay one plans only — it never bids, since the bid needs the signed-in
-browser on the PC; its boxes include the postcode postage is quoted to and
-what to assume where eBay quotes none. Each workflow's header comment is its
-documentation — the tier table, the budget, when to fire it.
+Each workflow's header comment is its documentation — the tier table, the
+budget, when to fire it.
+
+### The eBay one, from Actions
+
+It plans by default. Tick **live** and paste a session into the **token** box
+and it bids for real. Three things are worse there than on the PC, and all
+three bite at the moment of bidding:
+
+- **The session is borrowed.** A runner has no eBay sign-in, so one is
+  exported from the machine that has one: `npm run sniper:ebay --
+  --export-session` prints a line to paste in (blank box falls back to the
+  `EBAY_SESSION_STATE` secret). eBay ties a sign-in to the machine it was made
+  on as well as to the cookie, and a session presented from a datacenter
+  address is often challenged. That challenge lands seconds before a close,
+  and the lot is lost. Treat the line as the password it stands for.
+- **State is a cache, not a disk.** What is scheduled, bid on, won and spent
+  lives in `ebay-sniper-runs/`, carried between runs by `actions/cache`. On a
+  cache miss the run forgets what it won and the budget ceiling stops meaning
+  anything — so set **max_wins** and a small **budget** for a live run there.
+- **The job stops at six hours.** eBay closes hard, with no extended bidding,
+  so a run only has to outlive the lots it armed — but anything closing after
+  the job ends is simply missed.
+
+The browser runs headed against Xvfb rather than headless, because eBay serves
+a headless browser a different page.
 
 Secrets the repository needs:
 
@@ -278,6 +300,7 @@ Secrets the repository needs:
 | `FANATICS_REFRESH_TOKEN` | a live Fanatics run; `npm run sniper -- --export-session` mints one |
 | `ALT_SESSION_TOKEN` | a live Alt run; `npm run sniper:alt -- --login` then `--export-session` |
 | `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET` | the eBay scan; a developer.ebay.com **production** keyset, not the sandbox one |
+| `EBAY_SESSION_STATE` | a live eBay run from Actions; `npm run sniper:ebay -- --export-session` prints it. The dispatch box wins over it |
 
 A live run holds its bids open through extended bidding, so the job is given
 the full 360 minutes a hosted runner allows. Start Fanatics around 4 PM PT on

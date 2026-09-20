@@ -4,6 +4,7 @@ import {
   BID_INCREMENTS,
   EBAY_STEPS,
   openEbay,
+  parseSessionState,
   readBidAnswer,
   readGreeting,
   readOutcome,
@@ -541,6 +542,28 @@ describe("reading the cert off the slab", () => {
     expect(budget.left(monday)).toBe(0);
     expect(budget.left(new Date("2026-09-21T00:01:00Z"))).toBe(2);
     expect(new OcrBudget(0).left()).toBeGreaterThan(1_000_000);
+  });
+});
+
+describe("a session carried to another machine", () => {
+  const cookies = [{ name: "s", value: "abc", domain: ".ebay.com", path: "/" }];
+
+  test("what --export-session prints comes back as cookies", () => {
+    const line = Buffer.from(JSON.stringify(cookies)).toString("base64");
+    expect(parseSessionState(line)).toEqual(cookies);
+    // Pasted with the whitespace a form box adds.
+    expect(parseSessionState(`  ${line}\n`)).toEqual(cookies);
+    // Raw JSON is taken too, for a session moved by hand.
+    expect(parseSessionState(JSON.stringify(cookies))).toEqual(cookies);
+  });
+
+  test("anything else is refused rather than half-used", () => {
+    expect(() => parseSessionState("")).toThrow(/empty/);
+    expect(() => parseSessionState("   ")).toThrow(/empty/);
+    expect(() => parseSessionState("not a session")).toThrow(/not what --export-session prints/);
+    // Valid base64 of something that is not a cookie list.
+    expect(() => parseSessionState(Buffer.from('{"a":1}').toString("base64"))).toThrow(/carries no cookies/);
+    expect(() => parseSessionState(Buffer.from("[]").toString("base64"))).toThrow(/carries no cookies/);
   });
 });
 

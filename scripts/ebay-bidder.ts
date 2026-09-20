@@ -29,8 +29,9 @@
  * --rehearse has walked the flow on a real listing and the flow below has
  * been read against what it found. A rehearsal goes up to Confirm and stops.
  */
+import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import { chromium, type BrowserContext, type Locator, type Page } from "playwright";
+import { chromium, type BrowserContext, type Cookie, type Locator, type Page } from "playwright";
 import { itemUrl } from "./ebay-search";
 import { dollars, incrementSteps, withinMax, type Biddable, type BidResult, type Ladder } from "./sniper-book";
 
@@ -324,6 +325,12 @@ export async function openEbay(opts: {
   account?: string;
   live?: boolean;
   outDir: string;
+  /**
+   * A session exported from a signed-in machine, for a runner that has no
+   * profile of its own: what --export-session prints. Used only when there is
+   * no .ebay-session directory here already, so the PC keeps its own.
+   */
+  sessionState?: string;
 }): Promise<EbaySession> {
   if (opts.live && !BID_FLOW_VERIFIED) {
     throw new Error(
@@ -331,7 +338,20 @@ export async function openEbay(opts: {
       "run  npm run sniper:ebay -- --rehearse=<item number> --max=<dollars>  and read scripts/ebay-bidder.ts against what it found. " +
       "A plan (no --live) and --once still work.");
   }
-  const context = await chromium.launchPersistentContext(join(process.cwd(), SESSION_DIR), {
+  const dir = join(process.cwd(), SESSION_DIR);
+  // A pasted session is seeded into a fresh profile rather than used as a
+  // context of its own, so everything downstream — the bid flow, the
+  // screenshots, the greeting check — works the one way.
+  if (opts.sessionState && !existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+    const seeded = await chromium.launchPersistentContext(dir, { headless: true });
+    try {
+      await seeded.addCookies(parseSessionState(opts.sessionState));
+    } finally {
+      await seeded.close();
+    }
+  }
+  const context = await chromium.launchPersistentContext(dir, {
     headless: opts.headless ?? false,
     viewport: { width: 1400, height: 1000 },
     args: ["--disable-blink-features=AutomationControlled"],
@@ -345,7 +365,9 @@ export async function openEbay(opts: {
     }
     const me = await session.whoAmI();
     if (!me.signedIn) {
-      throw new Error("No eBay session. Sign in once with: npm run sniper:ebay -- --login");
+      throw new Error(opts.sessionState
+        ? "The pasted eBay session is not signed in. eBay ties a session to the machine it was made on as well as to the cookie, and one presented from somewhere else is often challenged — export a fresh one and try again, or run where you signed in."
+        : "No eBay session. Sign in once with: npm run sniper:ebay -- --login");
     }
     const wanted = opts.account?.trim().toLowerCase() ?? "";
     if (wanted && !me.greeting.toLowerCase().includes(wanted)) {
@@ -357,6 +379,47 @@ export async function openEbay(opts: {
     throw err;
   }
   return session;
+}
+
+/**
+ * The signed-in session, as one line to paste into a run or keep as a secret.
+ *
+ * Cookies only — no localStorage, no history — base64 so it survives a form
+ * box and a shell. It is a way in to the account: treat it as the password it
+ * stands for, and it lapses the way any eBay sign-in does.
+ */
+export async function exportSession(outDir: string): Promise<string> {
+  const context = await chromium.launchPersistentContext(join(process.cwd(), SESSION_DIR), { headless: true });
+  try {
+    const page = context.pages()[0] ?? await context.newPage();
+    const session = new EbaySession(context, page, outDir);
+    const me = await session.whoAmI();
+    if (!me.signedIn) throw new Error("This machine has no eBay session to export. Sign in first: npm run sniper:ebay -- --login");
+    const cookies = (await context.cookies()).filter((c) => /(^|\.)ebay\.[a-z.]+$/i.test(c.domain.replace(/^\./, "")) || /ebay/i.test(c.domain));
+    return Buffer.from(JSON.stringify(cookies)).toString("base64");
+  } finally {
+    await context.close();
+  }
+}
+
+/** What exportSession printed, back into cookies. */
+export function parseSessionState(text: string): Cookie[] {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("the eBay session is empty");
+  let json: string;
+  try {
+    json = trimmed.startsWith("[") ? trimmed : Buffer.from(trimmed, "base64").toString("utf8");
+  } catch {
+    throw new Error("the eBay session is not what --export-session prints");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new Error("the eBay session is not what --export-session prints");
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("the eBay session carries no cookies");
+  return parsed as Cookie[];
 }
 
 export { dollars };

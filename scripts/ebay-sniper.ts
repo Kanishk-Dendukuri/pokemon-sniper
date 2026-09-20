@@ -74,6 +74,9 @@
  *   --live                confirm the bids; refused until BID_FLOW_VERIFIED
  *   --once                one scan and one plan, then exit
  *   --login               sign in to eBay by hand, once, and save the session
+ *   --export-session      print this machine's eBay session as one line, to
+ *                         paste into a run elsewhere. It is a way in to the
+ *                         account — treat it as the password it stands for
  *   --account=Name        the name eBay greets the account by; another
  *                         account's session is refused
  *   --check-sellers       how many live auctions each seller has, and exit
@@ -88,6 +91,9 @@
  *   EBAY_CLIENT_ID, EBAY_CLIENT_SECRET    the developer.ebay.com keys
  *   EBAY_ACCOUNT                          as --account
  *   EBAY_ZIP                              as --zip
+ *   EBAY_SESSION_STATE                    a session from --export-session,
+ *                                         used only where there is no
+ *                                         .ebay-session profile already
  *   SHIPPING_UNKNOWN                      as --shipping-unknown
  *   MAX_WINS                              as --max-wins
  *   SELLERS_ONLY                          as --sellers-only
@@ -101,7 +107,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "path";
 import { pathToFileURL } from "url";
 import { loadEnvLocal } from "./carduploader-batch";
-import { EBAY_STEPS, openEbay, type EbaySession, type PreparedBid } from "./ebay-bidder";
+import { EBAY_STEPS, exportSession, openEbay, type EbaySession, type PreparedBid } from "./ebay-bidder";
 import {
   DAILY_CALL_ALLOWANCE,
   EbayApp,
@@ -617,6 +623,7 @@ export async function runEbaySniper(): Promise<void> {
   const once = process.argv.includes("--once");
   const login = process.argv.includes("--login");
   const checkSellers = process.argv.includes("--check-sellers");
+  const exportSess = process.argv.includes("--export-session");
   const rehearse = opt("rehearse", "");
   const headless = process.argv.includes("--headless");
   const headed = process.argv.includes("--headed");
@@ -624,6 +631,9 @@ export async function runEbaySniper(): Promise<void> {
   const outDir = opt("out", OUT_DIR);
   mkdirSync(outDir, { recursive: true });
   const account = opt("account", process.env.EBAY_ACCOUNT ?? "");
+  // A session exported from the signed-in machine, for a runner with no
+  // profile of its own. Only read when there is no profile here already.
+  const sessionState = (process.env.EBAY_SESSION_STATE ?? "").trim();
   // Where the cards would ship to. Anything that searches needs it — eBay
   // refuses the Authenticity Guarantee filter without somewhere to deliver
   // to — and it is what calculated postage is quoted to as well. The errands
@@ -638,6 +648,14 @@ export async function runEbaySniper(): Promise<void> {
   };
 
   // ── Errands ────────────────────────────────────────────────────────────────
+  if (exportSess) {
+    const token = await exportSession(outDir);
+    console.log(`\n${token}\n`);
+    say(`that one line is this machine's eBay session — paste it into the workflow's session box, or keep it as the EBAY_SESSION_STATE secret.`);
+    say(`it is a way in to the account: do not paste it anywhere else, and export a fresh one if it stops working.`);
+    return;
+  }
+
   if (login) {
     const session = await openEbay({ login: true, outDir, account });
     await session.close();
@@ -671,7 +689,7 @@ export async function runEbaySniper(): Promise<void> {
   if (rehearse) {
     const max = Number(opt("max", "1"));
     if (!(max > 0)) throw new Error(`--max must be a positive number of dollars, got "${opt("max", "")}"`);
-    const session = await openEbay({ outDir, account, headless });
+    const session = await openEbay({ outDir, account, headless, sessionState });
     try {
       const row: Biddable = {
         listingId: rehearse, title: `item ${rehearse}`, lot: rehearse,
@@ -1354,7 +1372,7 @@ export async function runEbaySniper(): Promise<void> {
   try {
     if (live) {
       console.log(`  ── signing in to eBay`);
-      session = await openEbay({ live: true, account, outDir, headless });
+      session = await openEbay({ live: true, account, outDir, headless, sessionState });
       console.log();
     }
 
