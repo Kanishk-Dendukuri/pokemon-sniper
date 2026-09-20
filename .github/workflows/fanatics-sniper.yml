@@ -44,13 +44,18 @@
 # form is unchanged: "$10-90: 85%, $90-450: 80%" pays 85% all-in of a card
 # worth $10–90 and 80% of one worth $90–450, and nothing outside that.
 #
-# A band may also price its own way, which is the point of the long form —
-# the cheap end of a table and the dear end rarely want the same evidence:
+# Both boxes start empty, and empty means that grader is not bid on. There is
+# no default table and there is not meant to be one: a table nobody typed is a
+# table nobody chose, and the next thing it does is spend money. A live run
+# with both boxes empty is stopped before it scans anything.
 #
-#   $1-30: 95% of average of the 3 lowest in 5 sales/60 days, min 3, round up, else 90% of alt value,
-#   $30-100: 85% of 2nd lowest in 3 months, else 80% of alt value,
-#   $100-500: 75% of lowest in 2 months,
-#   $500-1000: 60% of lowest in 2 months, min 5
+# A band may also price its own way, which is the point of the long form —
+# the cheap end of a table and the dear end rarely want the same evidence.
+# These two lines are the ones fitted on 2026-09-20; paste them in, or type
+# your own:
+#
+#   PSA  grades 1-10, $1-30: 95% of average of the 3 lowest in 5 sales/60 days, min 3, round up, else 90% of alt value, $30-100: 85% of 2nd lowest in 3 months, else 80% of alt value, $100-500: 75% of lowest in 2 months, $500-1000: 60% of lowest in 2 months, min 5
+#   CGC  grades 1-10, $1-15: 90% of average of the 3 lowest, min 3, $15-50: 70% of average of the 3 lowest, min 3
 #
 # After the rule a band may name, in this order and any of them left out:
 #   of <basis>     which sale the percentage multiplies — "of 2nd lowest",
@@ -138,13 +143,13 @@ on:
         type: boolean
         default: false
       psa_tiers:
-        description: 'PSA tier table. Short form "$10-90: 85%"; long form lets a band name its own basis, window, minimum, rounding and fallback. May open with "grades 1-10". Blank: PSA is not bid on'
+        description: 'PSA tier table. Short form "$10-90: 85%"; long form lets a band name its own basis, window, minimum, rounding and fallback. May open with "grades 1-10". LEAVE BLANK AND NO PSA LOT IS BID ON'
         type: string
-        default: "grades 1-10, $1-30: 95% of average of the 3 lowest in 5 sales/60 days, min 3, round up, else 90% of alt value, $30-100: 85% of 2nd lowest in 3 months, else 80% of alt value, $100-500: 75% of lowest in 2 months, $500-1000: 60% of lowest in 2 months, min 5"
+        default: ""
       cgc_tiers:
-        description: 'CGC tier table, the same way. Blank: CGC is not bid on'
+        description: 'CGC tier table, the same way. LEAVE BLANK AND NO CGC LOT IS BID ON'
         type: string
-        default: "grades 1-10, $1-15: 90% of average of the 3 lowest, min 3, $15-50: 70% of average of the 3 lowest, min 3"
+        default: ""
       value_basis:
         description: "How the recent sales become the one price the tier tables' percentages multiply, for any band that does not say for itself"
         type: choice

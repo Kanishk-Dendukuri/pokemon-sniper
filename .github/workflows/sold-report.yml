@@ -65,13 +65,13 @@ on:
         type: string
         default: "4"
       psa_tiers:
-        description: 'PSA tier table to judge the lots under. Short form "$10-90: 85%"; long form lets a band name its own basis, window, minimum, rounding and fallback — the same line the snipers take'
+        description: 'PSA tier table to judge the lots under. Short form "$10-90: 85%"; long form lets a band name its own basis, window, minimum, rounding and fallback — the same line the snipers take. Blank: no PSA lot is judged'
         type: string
-        default: "grades 1-10, $1-30: 95% of average of the 3 lowest in 5 sales/60 days, min 3, round up, else 90% of alt value, $30-100: 85% of 2nd lowest in 3 months, else 80% of alt value, $100-500: 75% of lowest in 2 months, $500-1000: 60% of lowest in 2 months, min 5"
+        default: ""
       cgc_tiers:
-        description: 'CGC tier table, the same way'
+        description: 'CGC tier table, the same way. Blank: no CGC lot is judged'
         type: string
-        default: "grades 1-10, $1-15: 90% of average of the 3 lowest, min 3, $15-50: 70% of average of the 3 lowest, min 3"
+        default: ""
       value_basis:
         description: "How the recent sales become the one price the shares multiply — the sniper must be run on the same basis"
         type: choice

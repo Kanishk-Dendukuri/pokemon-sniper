@@ -126,8 +126,10 @@
  *                         (see parseTiers). A line may open with
  *                         "grades 1-10" to set that grader's grade range.
  *                         The TIERS_PSA / TIERS_CGC environment variables do
- *                         the same, for a workflow input. A grader given no
- *                         table is not bid on at all
+ *                         the same, for a workflow input. There is no default
+ *                         table: a grader given none is not bid on at all,
+ *                         and a live run given none for either grader is
+ *                         refused before it scans anything
  *   --psa-grades=1-10     the grades to scan, per grader, and --cgc-grades=…
  *                         for CGC; PSA_GRADES / CGC_GRADES do the same. The
  *                         tier box's "grades 1-10" is the usual way in
@@ -441,8 +443,22 @@ export const TIERS_OFF: GraderTiers = { floor: Infinity, bands: [] };
 export function nothingToBidOn(table: TierTable = tierTable()): string | null {
   const off = GRADERS.filter((g) => table[g].bands.length === 0);
   if (off.length < GRADERS.length) return null;
-  return `⚠️  every grader is switched off (${off.join(", ")}), so this run will not bid on anything.` +
+  return `every grader is switched off (${off.join(", ")}), so this run will not bid on anything.` +
     ` Give it a tier table — --tiers-psa="$10-90: 85%, $90-450: 80%" or the same box in the workflow.`;
+}
+
+/**
+ * A live run has to have been told what to bid on.
+ *
+ * The tier boxes start empty and there is no default table behind them: a
+ * table nobody typed is a table nobody chose. A plan run with empty boxes is
+ * a fair thing to ask for — it shows what the filters do — but a live one is
+ * an hour of scanning that was never going to bid, so it is stopped here,
+ * before anything is scanned.
+ */
+export function requireSomethingToBidOn(live: boolean, table: TierTable = tierTable()): void {
+  const nothing = nothingToBidOn(table);
+  if (live && nothing) throw new Error(`refusing a live run: ${nothing}`);
 }
 
 /** Whether this grader is switched off for the run. */
@@ -2860,6 +2876,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   // Read before anything is scanned: a table or a cap that cannot be read is
   // a run that should not start.
   setTierTable(tiersFromArgs());
+  requireSomethingToBidOn(live);
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setGraderCopyCaps(graderCopyCapsFromArgs());
   setSalesRule(salesRuleFromArgs());
@@ -2891,7 +2908,7 @@ export async function runSniper(venue: Venue): Promise<void> {
     console.log(`    tiers ${grader}    ${formatTiers(tierTable()[grader])}${purse === undefined ? "" : ` — at most ${dollars(purse)} of the ceiling`}`);
   }
   const noTable = nothingToBidOn();
-  if (noTable) console.log(`    ${noTable}`);
+  if (noTable) console.log(`    ⚠️  ${noTable}`);
   const graderCaps = Object.entries(cardCaps().perCardByGrader ?? {});
   console.log(`    grades       ${GRADERS.map((g) => `${g} ${formatGradeRange(gradeRanges()[g])}`).join(", ")}`);
   console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` +

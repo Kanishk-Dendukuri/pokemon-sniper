@@ -9,51 +9,78 @@ import {
   parseSalesRule,
   DEFAULT_TIERS,
   formatTiers,
+  graderOff,
+  nothingToBidOn,
   parseGradeRange,
   parseTiers,
+  requireSomethingToBidOn,
+  tiersFromArgs,
 } from "@/scripts/sniper-core";
 import { DEFAULT_BUDGET_DOLLARS } from "@/scripts/sniper-book";
 import { fanatics } from "@/scripts/fanatics-sniper";
 import { alt } from "@/scripts/alt-sniper";
 
 /**
- * The three forms share one tier grammar, and a table that cannot be read is
- * a run that dies after the dispatch with the auction already closing. So
- * every box's default has to read — and the backtest's has to be the very
- * line the snipers bid, or it is measuring something else.
+ * No tier box carries a table.
+ *
+ * A prefilled table is a table nobody chose, and the next thing it does is
+ * spend money — so every box starts empty, empty means that grader is not
+ * bid on, and a live run that was given neither is refused before it scans.
+ * The lines worth pasting live in each workflow's header comment, where
+ * nothing can run them by accident.
  */
-const WORKFLOWS = ["fanatics-sniper.yml", "alt-sniper.yml", "sold-report.yml"];
+const WORKFLOWS = ["fanatics-sniper.yml", "alt-sniper.yml", "sold-report.yml", "ebay-sniper.yml"];
 
-const tierDefault = (name: string, input: string) => {
-  const text = readFileSync(join(__dirname, "..", "..", ".github", "workflows", name), "utf8");
-  const m = new RegExp(`\\n\\s*${input}:[\\s\\S]*?\\n\\s*default:\\s*"([^"]+)"`).exec(text);
-  expect(m, `${name} has a ${input} default`).not.toBeNull();
-  return m![1];
-};
+const readWorkflow = (name: string) => readFileSync(join(__dirname, "..", "..", ".github", "workflows", name), "utf8");
+const tierDefault = (name: string, input: string) =>
+  new RegExp(`\\n\\s*${input}:[\\s\\S]*?\\n\\s*default:\\s*"([^"]*)"`).exec(readWorkflow(name))?.[1];
 
 describe("sniper workflow tier defaults", () => {
   for (const name of WORKFLOWS) {
-    test(`${name}: psa_tiers / cgc_tiers defaults read, and read back the way they print`, () => {
+    test(`${name}: both tier boxes start empty, and empty is no bids`, () => {
       for (const input of ["psa_tiers", "cgc_tiers"]) {
-        const text = tierDefault(name, input);
-        const grades = /^grades?\s+([^,;]+)\s*[,;]\s*([\s\S]+)$/i.exec(text);
-        expect(() => parseGradeRange(grades![1]), text).not.toThrow();
-        const table = parseTiers(grades![2]);
-        expect(table.bands.length, text).toBeGreaterThan(0);
-        expect(parseTiers(formatTiers(table))).toEqual(table);
+        expect(tierDefault(name, input), `${name} ${input}`).toBe("");
       }
     });
   }
 
-  test("the backtest judges lots under the very table the snipers bid", () => {
-    for (const input of ["psa_tiers", "cgc_tiers"]) {
-      expect(tierDefault("sold-report.yml", input)).toBe(tierDefault("fanatics-sniper.yml", input));
-      expect(tierDefault("alt-sniper.yml", input)).toBe(tierDefault("fanatics-sniper.yml", input));
+  test("an empty box is that grader switched off, and both empty is a run that bids nothing", () => {
+    const table = tiersFromArgs({});
+    expect(graderOff("PSA", table)).toBe(true);
+    expect(graderOff("CGC", table)).toBe(true);
+    expect(nothingToBidOn(table)).toMatch(/every grader is switched off/);
+    // One table given and the other not: the one given still bids.
+    const half = tiersFromArgs({ TIERS_PSA: "$10-90: 85%" });
+    expect(graderOff("PSA", half)).toBe(false);
+    expect(graderOff("CGC", half)).toBe(true);
+    expect(nothingToBidOn(half)).toBeNull();
+  });
+
+  test("a live run with nothing to bid on is refused before it scans", () => {
+    const empty = tiersFromArgs({});
+    expect(() => requireSomethingToBidOn(true, empty)).toThrow(/refusing a live run: every grader is switched off/);
+    // A plan run with empty boxes is a fair thing to ask for.
+    expect(() => requireSomethingToBidOn(false, empty)).not.toThrow();
+    expect(() => requireSomethingToBidOn(true, tiersFromArgs({ TIERS_CGC: "$10-90: 70%" }))).not.toThrow();
+  });
+
+  test("the lines worth pasting are in the header, and they read", () => {
+    for (const name of ["fanatics-sniper.yml", "alt-sniper.yml"]) {
+      const header = readWorkflow(name).split("name: ")[0];
+      for (const grader of ["PSA", "CGC"]) {
+        const line = new RegExp(`^#   ${grader}\\s+grades? ([^,]+), ([\\s\\S]+?)$`, "m").exec(header);
+        expect(line, `${name} offers a ${grader} line`).not.toBeNull();
+        expect(() => parseGradeRange(line![1])).not.toThrow();
+        const table = parseTiers(line![2]);
+        expect(table.bands.length).toBeGreaterThan(0);
+        expect(parseTiers(formatTiers(table))).toEqual(table);
+      }
     }
   });
 
-  test("DEFAULT_TIERS is still the fitted table a run falls back to nothing from", () => {
+  test("DEFAULT_TIERS is still the fitted table, and still not what a run falls back on", () => {
     expect(formatTiers(DEFAULT_TIERS.PSA)).toBe("$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%");
+    expect(tiersFromArgs({}).PSA).not.toEqual(DEFAULT_TIERS.PSA);
   });
 });
 

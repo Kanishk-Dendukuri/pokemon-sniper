@@ -140,6 +140,7 @@ import {
   formatTiers,
   identifyViaBatch,
   nothingToBidOn,
+  requireSomethingToBidOn,
   marketPct,
   maxCopiesFromArgs,
   maxCopiesPerCard,
@@ -733,6 +734,7 @@ export async function runEbaySniper(): Promise<void> {
   // The tier boxes may carry "grades 7-10" at the head of a line, so the
   // tables are read first and the ranges come out of them.
   setTierTable(tiersFromArgs(process.env, DEFAULT_GRADE_RANGES));
+  requireSomethingToBidOn(live);
   const grades = gradeRanges();
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setSalesRule(salesRuleFromArgs());
@@ -762,7 +764,7 @@ export async function runEbaySniper(): Promise<void> {
   say(`new sets     nothing from a set released on or after ${cutoffDate(new Date(), newSetMonths)} (${newSetMonths} months)`);
   for (const grader of GRADERS) say(`tiers ${grader}    ${formatTiers(tierTable()[grader])}`);
   const noTable = nothingToBidOn();
-  if (noTable) say(noTable);
+  if (noTable) say(`⚠️  ${noTable}`);
   say(`per card     at most ${maxCopiesPerCard()} lot(s) of one card in flight or won`);
   say(`sales rule   ${formatSalesRule()}`);
   say(`value basis  the ${formatBasis()} of them — no buyer's premium here, so the share is of the hammer`);

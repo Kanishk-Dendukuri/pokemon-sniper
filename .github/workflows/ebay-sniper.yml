@@ -49,9 +49,15 @@
 # percentage of the hammer plus postage.
 #
 # A blank tier box means that grader is not bid on at all. It does not mean
-# "the usual table": a box left empty is likelier to be an oversight than a
-# request to spend money, so nothing is bid until a table is typed in. Fill
-# one in and leave the other blank to buy PSA and not CGC, or the reverse.
+# "the usual table": there is no default table anywhere, because a table
+# nobody typed is a table nobody chose and the next thing it does is spend
+# money. Fill one in and leave the other blank to buy PSA and not CGC, or the
+# reverse; leave both blank and a live run is refused before it scans.
+#
+# A band may price its own way — its own basis, window, minimum, rounding and
+# fallback, and "grades 7-10" at the head of the line to set the grades. See
+# the header of fanatics-sniper.yml for the whole grammar and two lines worth
+# pasting.
 #
 # The sellers are not a box. They are the four in DEFAULT_SELLERS, and the
 # wider Authenticity Guarantee pool alongside them unless sellers-only is
