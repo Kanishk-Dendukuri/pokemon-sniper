@@ -47,6 +47,15 @@
 # fanatics-sniper.yml and alt-sniper.yml, and mean the same things — except
 # that eBay charges the buyer no premium, so an all-in percentage here is a
 # percentage of the hammer plus postage.
+#
+# A blank tier box means that grader is not bid on at all. It does not mean
+# "the usual table": a box left empty is likelier to be an oversight than a
+# request to spend money, so nothing is bid until a table is typed in. Fill
+# one in and leave the other blank to buy PSA and not CGC, or the reverse.
+#
+# The sellers are not a box. They are the four in DEFAULT_SELLERS, and the
+# wider Authenticity Guarantee pool alongside them unless sellers-only is
+# ticked; change the four in code or run it locally with --sellers.
 name: eBay sniper
 
 on:
@@ -72,24 +81,24 @@ on:
         description: "Ceiling on what the run may spend, all-in (hammer + postage); the run ends when it is bought up to"
         type: string
         default: "10000"
-      sellers:
-        description: "eBay usernames bought from guaranteed or not, comma separated"
-        type: string
-        default: "zandgemporium,ryans_cardhouse,probstein123,psa"
       max_wins:
         description: "Lots to win before the run is over; 0 is as many as the budget stretches to"
         type: string
         default: "0"
       psa_tiers:
-        description: "PSA tier table, in dollars of the bid basis: from-to: flat $N | market - $N | N%"
+        description: "PSA tier table, in dollars of the bid basis: from-to: flat $N | market - $N | N%. BLANK OR 'none' = no PSA bids"
         type: string
         default: ""
       cgc_tiers:
-        description: "CGC tier table, the same way"
+        description: "CGC tier table, the same way. BLANK OR 'none' = no CGC bids"
         type: string
         default: ""
+      sales_rule:
+        description: "What counts as recent: how many sales are looked at and how old the oldest may be, e.g. 5 sales in 60 days"
+        type: string
+        default: "5 sales in 60 days"
       value_basis:
-        description: "How the recent sales become the one price the tier tables' percentages multiply"
+        description: "How those recent sales become the one price the tier tables' percentages multiply"
         type: choice
         default: "2nd lowest"
         options:
@@ -202,10 +211,10 @@ jobs:
           # Through the environment rather than the command line: these carry
           # "$", commas and spaces, which a shell would eat. Blank means the
           # code's own defaults.
-          SELLERS: ${{ inputs.sellers }}
           TIERS_PSA: ${{ inputs.psa_tiers }}
           TIERS_CGC: ${{ inputs.cgc_tiers }}
           VALUE_BASIS: ${{ inputs.value_basis }}
+          SALES_RULE: ${{ inputs.sales_rule }}
 
       # Every listing the scan looked at: what it is worth, what postage it
       # charges, what the run would have bid, and why anything was passed over.

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import type { Row } from "@/scripts/fanatics-sniper";
 import { FANATICS_STEPS } from "@/scripts/fanatics-bidder";
 import { ALT_STEPS } from "@/scripts/alt-bidder";
@@ -35,6 +35,7 @@ import {
   selectCandidates,
   maxCopiesFromArgs,
   setMaxCopiesPerCard,
+  graderOff,
   setTierTable,
   settle,
   tierCeiling,
@@ -45,6 +46,11 @@ import {
   toCsv,
   type ScannedLot,
 } from "@/scripts/fanatics-sniper";
+
+// Every grader starts switched off now: a run bids nothing until it is given
+// a tier table. These tests are about the table that was fitted, so they ask
+// for it by name rather than leaning on a default that no longer exists.
+beforeEach(() => setTierTable(DEFAULT_TIERS));
 
 describe("chase list", () => {
   test("matches the codes and phrases on the list", () => {
@@ -171,7 +177,7 @@ describe("tier table", () => {
     expect(() => parseTiers("")).toThrow(/at least one band/);
   });
 
-  test("a run bids by the table it is given, per grader, and the default otherwise", () => {
+  test("a run bids by the table it is given, and not at all by a grader it is given nothing for", () => {
     const before = tierTable();
     try {
       setTierTable(tiersFromArgs({ TIERS_PSA: "$4-8: flat $3, $8-200: 90%" }));
@@ -180,9 +186,21 @@ describe("tier table", () => {
       expect(maxBid("PSA", 5)).toEqual({ rule: "flat $3", share: null, allIn: 3.6, hammer: 3 });
       expect(maxBid("PSA", 100)).toEqual({ rule: "90% all-in", share: 0.9, allIn: 90, hammer: 75 });
       expect(maxBid("PSA", 201)).toBeNull();
-      // CGC was not given, so it is the default still.
-      expect(tierTable().CGC).toBe(DEFAULT_TIERS.CGC);
-      expect(maxBid("CGC", 100)).toEqual({ rule: "70% all-in", share: 0.7, allIn: 70, hammer: 58 });
+      // CGC was given nothing, so CGC is not bid on. A blank box is not the
+      // house table: it is no bids, which is the only safe thing an empty box
+      // can mean when the next thing it does is spend money.
+      expect(graderOff("CGC")).toBe(true);
+      expect(maxBid("CGC", 100)).toBeNull();
+      expect(formatTiers(tierTable().CGC)).toMatch(/^off —/);
+      // And it can be said outright, which is how one grader is turned off
+      // while the other keeps a table.
+      setTierTable(tiersFromArgs({ TIERS_PSA: "$10-100: 80%", TIERS_CGC: "none" }));
+      expect(graderOff("PSA")).toBe(false);
+      expect(graderOff("CGC")).toBe(true);
+      expect(maxBid("PSA", 50)).toEqual({ rule: "80% all-in", share: 0.8, allIn: 40, hammer: 33 });
+      expect(maxBid("CGC", 50)).toBeNull();
+      // A ceiling is still a number on a table nobody bids by.
+      expect(tierCeiling("CGC")).toBe(0);
       expect(() => tiersFromArgs({ TIERS_CGC: "$6-8: nope" })).toThrow(/the CGC tier table could not be read/);
     } finally {
       setTierTable(before);

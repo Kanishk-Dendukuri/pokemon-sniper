@@ -139,6 +139,7 @@ import {
   formatSalesRule,
   formatTiers,
   identifyViaBatch,
+  nothingToBidOn,
   marketPct,
   maxCopiesFromArgs,
   maxCopiesPerCard,
@@ -767,6 +768,8 @@ export async function runEbaySniper(): Promise<void> {
     : "every Pokémon auction under Authenticity Guarantee, whoever sells it — plus everything the named sellers list, guaranteed or not"}`);
   say(`new sets     nothing from a set released on or after ${cutoffDate(new Date(), newSetMonths)} (${newSetMonths} months)`);
   for (const grader of GRADERS) say(`tiers ${grader}    ${formatTiers(tierTable()[grader])}`);
+  const noTable = nothingToBidOn();
+  if (noTable) say(noTable);
   say(`per card     at most ${maxCopiesPerCard()} lot(s) of one card in flight or won`);
   say(`sales rule   ${formatSalesRule()}`);
   say(`value basis  the ${formatBasis()} of them — no buyer's premium here, so the share is of the hammer`);

@@ -255,7 +255,11 @@ export const GRADES = [7, 7.5, 8, 8.5, 9, 9.5, 10];
  * enforces that whatever table a run is given; the default floor simply
  * agrees with it.
  *
- * DEFAULT_TIERS is what a run uses unless told otherwise. A run is told with
+ * DEFAULT_TIERS is the table these were fitted as, and what the workflow
+ * forms are pre-filled with — but it is not what a run falls back on. A run
+ * told nothing bids nothing: every grader starts switched off, because a
+ * blank tier box is likelier to be an oversight than a request for the
+ * house table. A run is told with
  * --tiers-psa / --tiers-cgc, or TIERS_PSA / TIERS_CGC in the environment (the
  * workflow inputs), written the way formatTiers() prints it — a $7.50 floor
  * prints as "$7.5", and either spelling reads back:
@@ -294,7 +298,31 @@ export const DEFAULT_TIERS: TierTable = {
   ] },
 };
 
-let activeTiers: TierTable = DEFAULT_TIERS;
+/**
+ * A grader switched off: no band matches at any price, so nothing of theirs
+ * is ever bid on. What a tier box set to "none" becomes.
+ */
+export const TIERS_OFF: GraderTiers = { floor: Infinity, bands: [] };
+
+/**
+ * A word of warning for a run whose table bids on nothing, or null when it
+ * bids on something. Every grader off is a legitimate thing to ask for — a
+ * plan to see what the filters do, say — but it is far likelier to be a tier
+ * box left empty, so it is said out loud rather than left to a table line.
+ */
+export function nothingToBidOn(table: TierTable = tierTable()): string | null {
+  const off = GRADERS.filter((g) => table[g].bands.length === 0);
+  if (off.length < GRADERS.length) return null;
+  return `⚠️  every grader is switched off (${off.join(", ")}), so this run will not bid on anything.` +
+    ` Give it a tier table — --tiers-psa="$10-90: 85%, $90-450: 80%" or the same box in the workflow.`;
+}
+
+/** Whether this grader is switched off for the run. */
+export function graderOff(grader: Grader, table: TierTable = tierTable()): boolean {
+  return table[grader].bands.length === 0;
+}
+
+let activeTiers: TierTable = { CGC: TIERS_OFF, PSA: TIERS_OFF };
 
 /** The tier table this run bids by. */
 export function tierTable(): TierTable {
@@ -317,6 +345,7 @@ export function ruleText(rule: BidRule): string {
 
 /** A grader's table as one line, the way parseTiers() reads it back. */
 export function formatTiers(tiers: GraderTiers): string {
+  if (tiers.bands.length === 0) return "off — nothing of this grader's is bid on";
   let from = tiers.floor;
   return tiers.bands.map((b) => {
     const text = `$${from}-${b.upTo}: ${ruleText(b.rule)}`;
@@ -376,10 +405,20 @@ export function parseTiers(text: string): GraderTiers {
  * before anything is scanned, with the grader and the band named.
  */
 export function tiersFromArgs(env: Record<string, string | undefined> = process.env): TierTable {
-  const table = { ...DEFAULT_TIERS };
+  // Off until a table is asked for. A blank box is not "the usual table" —
+  // it is no bids at all, which is the only safe thing a blank box can mean
+  // when the next thing it does is spend money. DEFAULT_TIERS is still the
+  // table that was fitted, and what the workflow forms are pre-filled with.
+  const table: TierTable = { CGC: TIERS_OFF, PSA: TIERS_OFF };
   for (const grader of GRADERS) {
     const text = opt(`tiers-${grader.toLowerCase()}`, env[`TIERS_${grader}`] ?? "").trim();
     if (!text) continue;
+    // "none" switches the grader off altogether. Blank is not the same
+    // thing: blank means the table below, which does bid.
+    if (/^(?:none|off|no|skip)$/i.test(text)) {
+      table[grader] = TIERS_OFF;
+      continue;
+    }
     try {
       table[grader] = parseTiers(text);
     } catch (err) {
@@ -832,7 +871,7 @@ export function tierFloor(grader: Grader, table: TierTable = tierTable()): numbe
 /** The most a card can be worth and still be bid on at this grader. */
 export function tierCeiling(grader: Grader, table: TierTable = tierTable()): number {
   const { bands } = table[grader];
-  return bands[bands.length - 1].upTo;
+  return bands.length === 0 ? 0 : bands[bands.length - 1].upTo;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -2203,6 +2242,8 @@ export async function runSniper(venue: Venue): Promise<void> {
   console.log(`    max cards    ${maxCards > 0 ? maxCards : "every candidate"}`);
   console.log(`    batch        ${batchSize} cert(s) priced per round, ${concurrency} at a time; every candidate is priced`);
   for (const grader of GRADERS) console.log(`    tiers ${grader}    ${formatTiers(tierTable()[grader])}`);
+  const noTable = nothingToBidOn();
+  if (noTable) console.log(`    ${noTable}`);
   console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader`);
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
   console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);

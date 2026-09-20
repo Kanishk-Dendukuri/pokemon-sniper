@@ -71,6 +71,14 @@ its name, or several separated by commas (`--auction="Sep 04"`, or the AUCTION
 environment variable). An auction that matches nothing open stops the run
 before the scan and names the ones there are.
 
+**A blank tier box means that grader is not bid on.** It does not mean "the
+usual table": an empty box is likelier to be an oversight than a request to
+spend money, so every grader starts switched off and stays off until a table
+is given. Fill in PSA and leave CGC blank to buy PSA only, or write `none` in
+a box to say it outright. A run with both blank says so in its header and bids
+nothing. `DEFAULT_TIERS` is still the table these were fitted as, and what the
+Fanatics and Alt dispatch forms are pre-filled with.
+
 `--budget` is a ceiling on what the run may hold at once, all-in — $10,000
 unless told — and not a target: how many lots are won is the tier table's
 and the per-card cap's doing.

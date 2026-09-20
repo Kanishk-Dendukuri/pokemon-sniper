@@ -4,7 +4,7 @@
  * given, and the verdict travels with the row so nothing downstream bids on
  * it either.
  */
-import { describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import { unawardableRanges } from "@/lib/odds-config";
 import { AltSession } from "@/scripts/alt-bidder";
 import { FanaticsSession } from "@/scripts/fanatics-bidder";
@@ -59,6 +59,11 @@ const priced = (prices: number[]): CuPrice => ({
   salesAverage: null,
   sales: prices.map((price, i) => ({ price, date: `2026-09-${String(10 - i).padStart(2, "0")}` })),
 });
+
+// Every grader starts switched off now: a run bids nothing until it is given
+// a tier table. These tests are about the table that was fitted, so they ask
+// for it by name rather than leaning on a default that no longer exists.
+beforeEach(() => setTierTable(DEFAULT_TIERS));
 
 describe("what no pack can award", () => {
   test("under the ladder's floor, whichever figure is the low one", () => {

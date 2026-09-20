@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import { auctionNameFilter, auctionNumber, toSoldLot as fanaticsSoldLot } from "@/scripts/fanatics-sold";
 import { cycleCloseUnixS, toSoldLot as altSoldLot, zonedUnixS } from "@/scripts/alt-sold";
 import { ALT_STEPS } from "@/scripts/alt-bidder";
@@ -55,6 +55,11 @@ import {
 } from "@/scripts/sold-report";
 import { DEFAULT_TIERS, formatTiers, parseTiers, ruleText as ruleTextOf, selectCandidates, setTierTable, tierTable, type CuPrice, type TierTable } from "@/scripts/sniper-core";
 import { columnLetter, crc32, sheetName, xlsxBuffer, zipStored } from "@/scripts/xlsx";
+
+// Every grader starts switched off now: a run bids nothing until it is given
+// a tier table. These tests are about the table that was fitted, so they ask
+// for it by name rather than leaning on a default that no longer exists.
+beforeEach(() => setTierTable(DEFAULT_TIERS));
 
 describe("market value, the report's way", () => {
   test("five sales: drop the highest and the lowest, average the three left", () => {
