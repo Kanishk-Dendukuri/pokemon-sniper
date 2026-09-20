@@ -42,8 +42,9 @@ import { chromium, type Browser } from "playwright";
 import { FANATICS_STEPS, SESSION_DIR, listingUrl, openFanatics } from "./fanatics-bidder";
 import {
   GRADERS,
-  GRADES,
   fmtLocal,
+  gradeRanges,
+  gradesIn,
   parallel,
   runAsMain,
   type ScannedLot,
@@ -83,10 +84,22 @@ const ALGOLIA_KEY_MARGIN_S = 90;
  */
 export const SCAN_CONCURRENCY = 8;
 
+/**
+ * The Pokémon categories, as a fallback. What a scan actually filters on is
+ * every subCategory1 the facet reports with Pokémon in its name — Fanatics
+ * has added a language before now, and a category nobody listed here is a
+ * few hundred lots the run never sees.
+ */
 export const CATEGORIES = [
   "Trading Card Games > Pokémon (English)",
   "Trading Card Games > Pokémon (Japanese)",
 ];
+
+/** Every Pokémon category the facet knows about, or CATEGORIES when it knows none. */
+export function pokemonCategories(facet: Record<string, number> | undefined): string[] {
+  const found = Object.keys(facet ?? {}).filter((name) => /pok[eé]mon/i.test(name));
+  return found.length > 0 ? found.sort() : CATEGORIES;
+}
 
 /**
  * How far ahead an auction may close and still be scanned.
@@ -322,7 +335,8 @@ export async function collect(
 const fmtPacific = (unixS: number) => fmtLocal(unixS, TIME_ZONE, "PT");
 
 /**
- * Every live PSA/CGC 7–10 Pokémon lot in the Weekly Auction about to close.
+ * Every live PSA/CGC Pokémon lot in the Weekly Auction about to close, at
+ * the grades the run was told to scan.
  *
  * The status facet lags: a handful of lots from auctions that closed weeks ago
  * still read "Live", so auctions are taken from the end-time facet and only
@@ -341,8 +355,9 @@ async function scanFanatics(keyer: AlgoliaKey, now: Date, quiet = false): Promis
   ].join(" AND ");
 
   const facets = await algolia(keyer, {
-    filters: base, hitsPerPage: 0, facets: ["auctionEndDatetime", "grade"], maxValuesPerFacet: 100,
+    filters: base, hitsPerPage: 0, facets: ["auctionEndDatetime", "grade", "subCategory1"], maxValuesPerFacet: 100,
   });
+  const categories = pokemonCategories(facets.facets?.subCategory1);
   const nowS = Math.floor(now.getTime() / 1000);
   const open = Object.keys(facets.facets?.auctionEndDatetime ?? {})
     .map(Number)
@@ -363,12 +378,20 @@ async function scanFanatics(keyer: AlgoliaKey, now: Date, quiet = false): Promis
     say(`    skipping ${skipped.length} later auction(s): ${skipped.map((t) => fmtPacific(t)).join(", ")}`);
   }
 
+  // Only the grades the auction actually has, inside the run's range: the
+  // ladder runs 1–10 in half steps now, and enumerating all nineteen against
+  // an auction that holds six of them is thirteen empty queries a cell.
+  const listed = new Set(Object.keys(facets.facets?.grade ?? {}).map(Number).filter((g) => g > 0));
+  const ranges = gradeRanges();
+  say(`    grades ${GRADERS.map((g) => `${g} ${ranges[g].min}–${ranges[g].max}`).join(", ")}, in ${categories.length} Pokémon categor${categories.length === 1 ? "y" : "ies"}`);
+
   const hits: Hit[] = [];
   for (const end of ends) {
     const cells: string[] = [];
     for (const grader of GRADERS) {
-      for (const grade of GRADES) {
-        for (const category of CATEGORIES) {
+      const grades = gradesIn(ranges[grader]).filter((g) => listed.size === 0 || listed.has(g));
+      for (const grade of grades) {
+        for (const category of categories) {
           cells.push(`${base} AND auctionEndDatetime:${end} AND gradingService:${grader} AND grade:${grade} AND subCategory1:${quote(category)}`);
         }
       }
@@ -410,7 +433,12 @@ export const fanatics: Venue = {
   zoneLabel: "PT",
   sessionDir: SESSION_DIR,
   steps: FANATICS_STEPS,
-  chaseList: true,
+  // PSA slabs are priced whatever the title says: Fanatics lists thousands of
+  // them and pricing is free, so the chase list was only ever keeping the
+  // credits off bulk that the tier table would have turned down anyway. CGC
+  // keeps it — the CGC end of a Weekly Auction is where the $6 energies,
+  // insert cards and sticker sheets live.
+  chaseList: { PSA: false, CGC: true },
   // Lots close one by one here — a lot nobody bids on between 7:00 and 7:30
   // PM PT closes at 7:30 sharp — so the bids go on at 7:27, three minutes
   // before that cliff, and the whole auction never ends as one.

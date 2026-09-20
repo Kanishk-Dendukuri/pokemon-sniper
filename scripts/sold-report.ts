@@ -137,7 +137,11 @@ import {
   type TierBand,
   type TierTable,
   type Venue,
+  bandBasis,
   bidBasis,
+  selectionRule,
+  quoteBand,
+  type PriceEvidence,
 } from "./sniper-core";
 import { writeXlsx, type Cell, type Sheet } from "./xlsx";
 
@@ -568,6 +572,8 @@ export type LotRow = {
   market_low: number | "";
   /** The report's market value: the five most recent sales, highest and lowest dropped, the rest averaged. */
   market_value: number | "";
+  /** How the band worked out what the card is worth — its own basis and window, or the alt value it fell back on. */
+  sniper_priced_by?: string;
   market_high: number | "";
   sales_used: number;
   oldest_sale_days: number | "";
@@ -612,7 +618,7 @@ export type LotRow = {
 export const LOT_COLUMNS: (keyof LotRow)[] = [
   "venue", "auction", "closed", "lot", "title", "grader", "grade", "language", "cert", "keywords",
   "hammer", "all_in", "bid_count",
-  "market_low", "market_value", "market_high", "sales_used", "oldest_sale_days", "own_sale_in_comps",
+  "market_low", "market_value", "market_high", "sniper_priced_by", "sales_used", "oldest_sale_days", "own_sale_in_comps",
   "hammer_pct", "all_in_pct", "bucket",
   "sniper_market_price", "low_pct_of_value", "grid_band", "tier_band", "tier_rule", "sniper_max_hammer", "sniper_max_all_in", "sniper_max_pct", "sniper_could_win",
   "resale_rate_pct", "resells_for", "winner_profit",
@@ -646,7 +652,7 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
     hammer: lot.hammer,
     all_in: lot.allIn,
     bid_count: lot.bidCountKnown === false ? "" : lot.bidCount,
-    market_low: "", market_value: "", market_high: "",
+    market_low: "", market_value: "", market_high: "", sniper_priced_by: "",
     sales_used: 0, oldest_sale_days: "", own_sale_in_comps: "",
     hammer_pct: "", all_in_pct: "", bucket: "",
     sniper_market_price: "", low_pct_of_value: "", grid_band: "", tier_band: "", tier_rule: "",
@@ -669,6 +675,9 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
   // can be read off the sheet.
   const used = recentSales(price.sales);
   row.sales_used = used.length;
+  // The sniper never saw this lot's own sale — it was pricing hours before
+  // the close — so everything below is worked without it.
+  let ownSale: Sale | null = null;
   if (used.length > 0) {
     const prices = used.map((s) => s.price);
     const low = Math.min(...prices);
@@ -678,6 +687,7 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
     row.market_high = high;
     row.oldest_sale_days = Math.round(Math.max(...used.map((s) => (now.getTime() - new Date(s.date).getTime()) / 86_400_000)));
     const own = ownSaleIndex(used, lot);
+    ownSale = own >= 0 ? used[own] : null;
     row.own_sale_in_comps = own >= 0 ? "yes" : "no";
     // The sniper never saw this lot's own sale — it was pricing hours before
     // the close — so its bid is worked from the comps without it. A cheap
@@ -698,21 +708,37 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
     }
   }
 
-  const gate = salesGate(price.sales, now);
+  // The evidence the sniper would have had: this lot's own sale never
+  // happened yet, so it is taken out before anything is worked from it.
+  const evidence: PriceEvidence = {
+    sales: price.sales,
+    // A backtest cannot lean on the alt value: Card Uploader's estimate is
+    // today's, not the one the sniper would have seen months ago, so a band
+    // that falls back on it is left to fail here rather than be flattered.
+    altValue: null,
+    now,
+    omit: ownSale ? (sale) => sale === ownSale : undefined,
+  };
+
+  // The widest net this table casts: a table whose bands reach further back
+  // than the run's own rule prices lots the run's rule would have turned down.
+  const gate = salesGate(price.sales, now, selectionRule(tierTable()[candidate.grader]));
   if (!gate.ok) { row.status = gate.reason ?? "sales gate"; return row; }
+
+  const basis = bandBasis(candidate.grader, evidence);
+  if (basis.price === null) { row.status = basis.reason; return row; }
   if (row.sniper_market_price === "" || row.market_value === "") { row.status = "no priced sales"; return row; }
   row.priceable = true;
   row.grid_band = gridBandLabel(row.sniper_market_price);
-  row.tier_band = tierBandLabel(candidate.grader, row.sniper_market_price);
+  row.tier_band = tierBandLabel(candidate.grader, basis.price);
 
-  // The sniper's own bid on this lot, from the tier table off the bid basis.
-  const bid = maxBid(candidate.grader, row.sniper_market_price);
-  if (!bid) {
-    row.status = row.sniper_market_price < tierFloor(candidate.grader)
-      ? `market price $${row.sniper_market_price} is under the $${tierFloor(candidate.grader)} ${candidate.grader} floor`
-      : `market price $${row.sniper_market_price} is above the $${tierCeiling(candidate.grader)} ${candidate.grader} tier ceiling`;
-    return row;
-  }
+  // The sniper's own bid on this lot: the band its value falls in, priced the
+  // way that band prices — which is not the way the run prices, wherever the
+  // table says so.
+  const quoted = quoteBand(candidate.grader, basis.price, evidence);
+  if (!quoted.ok) { row.status = quoted.reason; return row; }
+  const bid = quoted.quote;
+  row.sniper_priced_by = bid.via;
   row.tier_rule = bid.rule;
   row.sniper_max_hammer = bid.hammer;
   row.sniper_max_all_in = bid.allIn;

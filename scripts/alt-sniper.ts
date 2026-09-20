@@ -23,7 +23,7 @@
  * about once more, through the public listing query, which carries it.
  *
  * There is no chase list here. An Alt Auction holds a thousand or so PSA/CGC
- * 7–10 Pokémon lots — the size of one Fanatics category, not one Fanatics
+ * Pokémon lots — the size of one Fanatics category, not one Fanatics
  * auction — so every one of them is a candidate and the sales rule and the
  * tier table decide the rest.
  *
@@ -41,7 +41,8 @@ import { pathToFileURL } from "url";
 import { ALT_STEPS, BID_INPUT_VERIFIED, SESSION_DIR, gqlPublic, listingUrl, lotLabel, openAlt } from "./alt-bidder";
 import {
   GRADERS,
-  GRADES,
+  gradeRanges,
+  gradesIn,
   fmtLocal,
   parallel,
   opt,
@@ -156,10 +157,11 @@ async function search(key: SearchKey, params: Record<string, unknown>): Promise<
   return { found: result.found ?? 0, hits: (result.hits ?? []).map((h) => h.document) };
 }
 
-/** The grade keys of every PSA and CGC grade chased, in Alt's spelling. */
-export function gradeKeys(): string[] {
-  const keys = GRADERS.flatMap((g) => GRADES.map((n) => `${g}-${n}`));
-  keys.push(CGC_PRISTINE_KEY);
+/** The grade keys of every PSA and CGC grade the run scans, in Alt's spelling. */
+export function gradeKeys(ranges = gradeRanges()): string[] {
+  const keys = GRADERS.flatMap((g) => gradesIn(ranges[g]).map((n) => `${g}-${n}`));
+  // Pristine is a CGC 10 by another name, so it comes along whenever 10 does.
+  if (ranges.CGC.max >= 10) keys.push(CGC_PRISTINE_KEY);
   return keys;
 }
 
@@ -241,7 +243,8 @@ async function certOf(listingId: string): Promise<string> {
 }
 
 /**
- * Every live PSA/CGC 7–10 Pokémon lot in the Alt Auction about to close.
+ * Every live PSA/CGC Pokémon lot in the Alt Auction about to close, at the
+ * grades the run scans.
  *
  * The index is filtered to the cycle, the category and the grade keys, and
  * paged through in full — a cycle holds a thousand or so such lots. Then the

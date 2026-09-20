@@ -28,7 +28,7 @@ import {
   toLot,
   type Hit,
 } from "./fanatics-sniper";
-import { BUYERS_PREMIUM, GRADERS, GRADES, fmtLocal, parallel } from "./sniper-core";
+import { BUYERS_PREMIUM, GRADERS, fmtLocal, gradeRanges, gradesIn, parallel } from "./sniper-core";
 import type { SoldAuction, SoldLot } from "./sold-report";
 
 /** The site's own list of auctions, closed ones included, which needs no account. */
@@ -139,7 +139,7 @@ export async function scanFanaticsSold(opts: { count: number; headed: boolean })
       // fits a query or needs at most one split (scripts/fanatics-sniper.ts).
       const cells: string[] = [];
       for (const grader of GRADERS) {
-        for (const grade of GRADES) {
+        for (const grade of gradesIn(gradeRanges()[grader])) {
           for (const category of CATEGORIES) {
             cells.push(`${BASE} AND ${auctionNameFilter(n)} AND gradingService:${grader} AND grade:${grade} AND subCategory1:${quote(category)}`);
           }
@@ -147,7 +147,7 @@ export async function scanFanaticsSold(opts: { count: number; headed: boolean })
       }
       const collected = await parallel(cells, SCAN_CONCURRENCY, (filters) => collect(keyer, filters, [], 0, SOLD_ATTRIBUTES));
       const lots = collected.flat().map((h) => toSoldLot(h as SoldHit));
-      console.log(`    ${name}  ·  closed ${closedAtUnixS ? fmtLocal(closedAtUnixS, TIME_ZONE, "PT") : "?"}  ·  ${lots.length} sold PSA/CGC 7–10 Pokémon lot(s)`);
+      console.log(`    ${name}  ·  closed ${closedAtUnixS ? fmtLocal(closedAtUnixS, TIME_ZONE, "PT") : "?"}  ·  ${lots.length} sold PSA/CGC Pokémon lot(s)`);
       auctions.push({ venue: "fanatics", id: String(n), name, closedAtUnixS, lots });
     }
     if (auctions.length < opts.count) {

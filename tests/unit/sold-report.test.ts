@@ -700,7 +700,7 @@ describe("Playwright's socket crash", () => {
 
 const funnel = (venue: "fanatics" | "alt", name: string, rows: LotRow[]): AuctionFunnel => ({
   auction: { venue, id: name, name, closedAtUnixS: 1788746400, lots: [] },
-  scanned: 100, counts: { offChaseList: 50, noCert: 0, blockList: 0, blockListDetail: "", masterBallOrDuplicate: 0 },
+  scanned: 100, counts: { offChaseList: 50, noCert: 0, blockList: 0, blockListDetail: "", ungraded: 0, noNumber: 0, offGrade: 0, masterBallOrDuplicate: 0 },
   candidates: 20, beyondMaxCards: 0, rows,
 });
 

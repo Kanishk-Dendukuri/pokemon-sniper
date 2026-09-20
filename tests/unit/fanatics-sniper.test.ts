@@ -33,6 +33,7 @@ import {
   salesGate,
   salesMedian,
   selectCandidates,
+  graderCopyCapsFromArgs,
   maxCopiesFromArgs,
   setMaxCopiesPerCard,
   graderOff,
@@ -325,7 +326,7 @@ describe("the CSV", () => {
   test("carries only the columns worth reading, in order", () => {
     expect(CSV_COLUMNS).toEqual([
       "url", "title", "auction", "lot", "language", "grader", "grade", "cert",
-      "market_price", "sales_median", "tier_rule", "max_bid_hammer", "max_bid_all_in",
+      "market_price", "sales_median", "priced_by", "tier_rule", "max_bid_hammer", "max_bid_all_in",
       "bid_placed", "bid_status", "final_bid", "final_paid_all_in", "market_pct",
       "unawardable",
     ]);
@@ -341,7 +342,7 @@ describe("the CSV", () => {
     } satisfies Row;
     const [header, line] = toCsv([row]).trim().split("\n");
     expect(header).toBe(CSV_COLUMNS.join(","));
-    expect(line).toBe('https://www.fanaticscollect.com/weekly/x,"Pikachu, ""the"" one",WA242,WA242 Lot: 1,English,PSA,10,123,60,70,65% all-in,32,39,32,won,30,36,51.4,');
+    expect(line).toBe('https://www.fanaticscollect.com/weekly/x,"Pikachu, ""the"" one",WA242,WA242 Lot: 1,English,PSA,10,123,60,70,,65% all-in,32,39,32,won,30,36,51.4,');
     expect(line).not.toContain("secret");
     expect(line).not.toContain("internal");
   });
@@ -374,25 +375,26 @@ describe("parallel", () => {
 describe("card priority order", () => {
   const lot = (gradingService: string, grade: number, title = "") => ({ gradingService, grade, title });
 
-  test("PSA 10 down to 7, then CGC Pristine, Gem Mint, then CGC 9.5 down to 7", () => {
-    const ranks = [
-      lot("PSA", 10), lot("PSA", 9.5), lot("PSA", 9), lot("PSA", 7),
-      lot("CGC", 10, "Charizard CGC 10 PRISTINE"),
-      lot("CGC", 10, "Charizard CGC 10 GEM MINT"),
-      lot("CGC", 9.5), lot("CGC", 9), lot("CGC", 8.5), lot("CGC", 7),
-    ].map(priorityRank);
-    expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
-    expect(new Set(ranks).size).toBe(ranks.length);
+  test("the full arts first, then everything else — grade and grader do not come into it", () => {
+    const art = [
+      "2022 Pokemon Lost Origin Alt Art Giratina V #186 PSA 10",
+      "2023 Pokemon Japanese SV2a 151 Full Art Charizard ex #201 CGC 9.5",
+      "2023 Pokemon Japanese Clay Burst Iono SAR #091 CGC 8",
+      "2024 Pokemon Japanese Crimson Haze Special Illustration Rare Sableye #086 PSA 4",
+    ];
+    const plain = [
+      "1999 Pokemon Base Set Holo Charizard #4 PSA 10",
+      "2016 Pokemon XY Evolutions Holo Blastoise #2 CGC 10 PRISTINE",
+    ];
+    for (const title of art) expect(priorityRank(lot("PSA", 9, title))).toBe(0);
+    for (const title of plain) expect(priorityRank(lot("PSA", 10, title))).toBe(1);
+    // A full art in a CGC 3 still comes before a plain card in a PSA 10.
+    expect(priorityRank(lot("CGC", 3, art[0]))).toBeLessThan(priorityRank(lot("PSA", 10, plain[0])));
   });
 
-  test("the worst PSA still outranks the best CGC", () => {
-    expect(priorityRank(lot("PSA", 7)))
-      .toBeLessThan(priorityRank(lot("CGC", 10, "Charizard CGC 10 PRISTINE")));
-  });
-
-  test("a CGC Gem Mint 10 outranks a CGC 9.5", () => {
-    expect(priorityRank(lot("CGC", 10, "Charizard CGC 10 GEM MINT")))
-      .toBeLessThan(priorityRank(lot("CGC", 9.5)));
+  test("the grade no longer orders anything, so price can", () => {
+    expect(priorityRank(lot("PSA", 7))).toBe(priorityRank(lot("CGC", 10, "Charizard CGC 10 PRISTINE")));
+    expect(priorityRank(lot("CGC", 10, "Charizard CGC 10 GEM MINT"))).toBe(priorityRank(lot("CGC", 9.5)));
   });
 });
 
@@ -451,7 +453,7 @@ describe("per-card caps", () => {
 
   test("four lots of one card per auction by default, and nothing is read from the database", () => {
     expect(DEFAULT_MAX_COPIES_PER_CARD).toBe(4);
-    expect(cardCaps()).toEqual({ perCard: 4 });
+    expect(cardCaps()).toEqual({ perCard: 4, perCardByGrader: {} });
   });
 
   test("the run's own cap wins over the default, and only a whole number of at least 1 is one", () => {
@@ -459,13 +461,18 @@ describe("per-card caps", () => {
     expect(maxCopiesFromArgs({ MAX_COPIES_PER_CARD: " 2 " })).toBe(2);
     expect(() => maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "0" })).toThrow(/at least 1/);
     expect(() => maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "2.5" })).toThrow(/whole number/);
-    expect(() => maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "lots" })).toThrow(/whole number/);
+    expect(() => maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "lots" })).toThrow(/cannot read "lots"/);
+    // A grader may have a cap of its own in the same box.
+    expect(maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "6, CGC 4" })).toBe(6);
+    expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "6, CGC 4" })).toEqual({ CGC: 4 });
+    expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "6, CGC 4", MAX_COPIES_CGC: "2" })).toEqual({ CGC: 2 });
+    expect(() => maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "6, BGS 4" })).toThrow(/not a grader/);
   });
 
   test("the cap the run was given is the one the book bids under", () => {
     try {
       setMaxCopiesPerCard(2);
-      expect(cardCaps()).toEqual({ perCard: 2 });
+      expect(cardCaps()).toEqual({ perCard: 2, perCardByGrader: {} });
     } finally {
       setMaxCopiesPerCard(DEFAULT_MAX_COPIES_PER_CARD);
     }

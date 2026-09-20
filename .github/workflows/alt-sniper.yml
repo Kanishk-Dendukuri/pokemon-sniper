@@ -5,7 +5,7 @@
 # scripts/sniper-core.ts for the tier table, the sales-history rule and the
 # hold, scripts/alt-sniper.ts for the scan, and scripts/alt-bidder.ts for the
 # session and the bid ladder. One difference from Fanatics: there is no chase
-# list here. An Alt Auction holds a thousand or so PSA/CGC 7–10 Pokémon lots
+# list here. An Alt Auction holds a thousand or so PSA/CGC Pokémon lots
 # and every one of them is a candidate; the sales rule and the tier table
 # decide the rest.
 #
@@ -31,13 +31,50 @@
 #
 # The tier table — what to bid on a card by what it is worth — is typed into
 # the run, one line per grader, in dollars of the card's bid basis (the value
-# basis box, the second-lowest of its five recent sales by default):
-# "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%" bids a flat
-# $5 on a card worth $7.50–8, $3 under on one worth $8–10, 85% all-in of one
-# worth $10–90 and 80% of one worth $90–450; under $7.50 and over $450 nothing is
-# bid. The boxes' defaults are the code's own (DEFAULT_TIERS); the sold-report
-# workflow is where a new line is tried against past auctions before it goes
-# here. A line that cannot be read stops the run before anything is scanned.
+# basis box, the second-lowest of its five recent sales by default). The short
+# form is unchanged: "$10-90: 85%, $90-450: 80%" pays 85% all-in of a card
+# worth $10–90 and 80% of one worth $90–450, and nothing outside that.
+#
+# A band may also price its own way, which is the point of the long form —
+# the cheap end of a table and the dear end rarely want the same evidence:
+#
+#   $1-30: 95% of average of the 3 lowest in 5 sales/60 days, min 3, round up, else 90% of alt value,
+#   $30-100: 85% of 2nd lowest in 3 months, else 80% of alt value,
+#   $100-500: 75% of lowest in 2 months,
+#   $500-1000: 60% of lowest in 2 months, min 5
+#
+# After the rule a band may name, in this order and any of them left out:
+#   of <basis>     which sale the percentage multiplies — "of 2nd lowest",
+#                  "of average of the 3 lowest", "of lowest", "of median",
+#                  or "of alt value" (Card Uploader's estimate for the cert,
+#                  which is there whether the card has sold lately or not)
+#   in <window>    how far back it looks — "in 3 months", "in 60 days",
+#                  "in 5 sales/2 months"
+#   min <n>        how few sales will still do; below that the fallback fires
+#   round up       the bid is a whole dollar rounded up rather than down,
+#                  which costs the odd dollar over the rule and wins the lot
+#                  that a sixty-cent shortfall would have lost
+#   else <n>% of alt value   what to bid when the sales are not there;
+#                  "else none" refuses instead, and so does a band that says
+#                  nothing — a bid priced off evidence the band asked for and
+#                  did not get is a bid at a made-up number
+#
+# Whatever a band does not name is the run's own value-basis and sales-rule
+# boxes. The band is picked once, on the widest net the whole table casts, and
+# the band it lands in then prices the card its own way — so a table whose
+# bands disagree about the evidence still has one answer for which band a card
+# is in. With too few sales for even that, the card's alt value picks the band.
+#
+# The line may open with "grades 1-10" to say which grades of that grader to
+# scan; it rides here because a dispatch form takes ten inputs and this is the
+# grader's own line already. Grades run 1–10 in half steps, and a $12 card in a
+# PSA 4 is priced off PSA 4 comps like any other.
+#
+# The sold-report workflow is where a new line is tried against past auctions
+# before it goes here; it reads the same long form, except that it never falls
+# back on the alt value — that figure is today's, not the one the sniper would
+# have had months ago. A line that cannot be read stops the run before
+# anything is scanned, naming the band it could not read.
 #
 # The value basis box is what a card is worth, before any percentage touches
 # it: the sniper looks up the card's recent sales and boils them down to one
@@ -86,7 +123,7 @@ on:
   workflow_dispatch:
     inputs:
       budget:
-        description: "Ceiling on what the run may hold at once, all-in (hammer + 20% premium); not a target"
+        description: 'Ceiling on what the run may hold at once, all-in (hammer + 20% premium); not a target. A grader may have a purse of its own under it: "10000, PSA 6000, CGC 1500"'
         type: string
         default: "10000"
       live:
@@ -98,15 +135,15 @@ on:
         type: boolean
         default: false
       psa_tiers:
-        description: "PSA tier table, in dollars of the bid basis (see the value basis box): from-to: flat $N | market - $N | N%"
+        description: 'PSA tier table. Short form "$10-90: 85%"; long form lets a band name its own basis, window, minimum, rounding and fallback. May open with "grades 1-10". Blank: PSA is not bid on'
         type: string
-        default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%"
+        default: "grades 1-10, $1-30: 95% of average of the 3 lowest in 5 sales/60 days, min 3, round up, else 90% of alt value, $30-100: 85% of 2nd lowest in 3 months, else 80% of alt value, $100-500: 75% of lowest in 2 months, $500-1000: 60% of lowest in 2 months, min 5"
       cgc_tiers:
-        description: "CGC tier table, the same way"
+        description: 'CGC tier table, the same way. Blank: CGC is not bid on'
         type: string
-        default: "$7.5-8: flat $5, $8-10: market - $3, $10-90: 77%, $90-450: 70%"
+        default: "grades 1-10, $1-15: 90% of average of the 3 lowest, min 3, $15-50: 70% of average of the 3 lowest, min 3"
       value_basis:
-        description: "How the recent sales become the one price the tier tables' percentages multiply"
+        description: "How the recent sales become the one price the tier tables' percentages multiply, for any band that does not say for itself"
         type: choice
         default: "2nd lowest"
         options:
@@ -119,13 +156,13 @@ on:
           - "median"
           - "average"
       sales_rule:
-        description: "How many recent sales a price is worked from, and how old the oldest of them may be"
+        description: 'How many recent sales a price is worked from and how old the oldest may be, for any band that does not say for itself; "5 sales in 60 days, at least 3" settles for fewer'
         type: string
         default: "5 sales in 60 days"
       max_copies_per_card:
-        description: "Most lots of one card to hold at once, counted across every grade and both graders"
+        description: 'Most lots of one card to hold at once, across every grade and both graders. A grader may have a cap of its own, counted over its own copies: "6, CGC 4"'
         type: string
-        default: "4"
+        default: "4, CGC 4"
       fire_after_minutes:
         description: "Minutes after extended bidding opens (9:00 PM ET) to put the bids on (or sooner, the moment the auction reads seconds from its end)"
         type: string
@@ -210,7 +247,8 @@ jobs:
           ALT_SESSION_TOKEN: ${{ inputs.token || secrets.ALT_SESSION_TOKEN }}
           # The tier tables, through the environment rather than the command
           # line: the lines carry "$" and spaces, which a shell would eat.
-          # Blank means the code's own defaults.
+          # Blank switches that grader off altogether — a run bids nothing it
+          # was not given a table for.
           TIERS_PSA: ${{ inputs.psa_tiers }}
           TIERS_CGC: ${{ inputs.cgc_tiers }}
           # How a card's price is worked out from its sales: the sales rule —

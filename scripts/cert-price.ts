@@ -38,8 +38,23 @@ export type Sale = { price: number; date: string; platform?: string; url?: strin
 export const DEFAULT_MIN_SALES = 5;
 export const DEFAULT_SALES_WINDOW_DAYS = 60;
 
-/** How many sales a price is worked from, and how old the oldest of them may be. */
-export type SalesRule = { count: number; windowDays: number };
+/**
+ * How many sales a price is worked from, how old the oldest of them may be,
+ * and how few of them will still do.
+ */
+export type SalesRule = {
+  /** How many of the newest sales are looked at. */
+  count: number;
+  /** How old the oldest of them may be, in days. */
+  windowDays: number;
+  /**
+   * The fewest of them that have to be there. Absent means `count` — every
+   * sale the rule looks at. A smaller number prices a thinner card: "5 sales
+   * in 60 days, at least 3" works from whatever three, four or five of them
+   * the window holds, and only gives up under three.
+   */
+  need?: number;
+};
 
 export const DEFAULT_SALES_RULE: SalesRule = { count: DEFAULT_MIN_SALES, windowDays: DEFAULT_SALES_WINDOW_DAYS };
 
@@ -65,26 +80,100 @@ export function salesWindowDays(): number {
   return activeSalesRule.windowDays;
 }
 
+/** The fewest sales that will still price a card under this rule. */
+export function needSales(rule: SalesRule = activeSalesRule): number {
+  return rule.need ?? rule.count;
+}
+
+const DAYS_IN: Record<string, number> = { d: 1, w: 7, m: 30, y: 365 };
+
 /**
- * A sales rule from one line: "5 sales in 60 days". The words are optional
- * either side of the numbers — "5 in 60", "5 sales within the last 60 days"
- * and "5 sales/60d" all read the same — but both numbers have to be there, so
- * a half-typed box is an error rather than a guess.
+ * A length of time in days: "60", "60 days", "8 weeks", "3 months", "1 year".
+ * A month is thirty days here and a year three hundred and sixty-five — near
+ * enough for a sales window, and it keeps "2 months" and "60 days" the same
+ * thing, which is how the tier tables are written. Null when the words are
+ * not a length of time at all.
+ */
+export function parseDuration(text: string): number | null {
+  const m = /^(\d+(?:\.\d+)?)\s*(d|days?|w|wks?|weeks?|m|mo|mos|mons?|months?|y|yrs?|years?)?$/.exec(text.trim().toLowerCase());
+  if (!m) return null;
+  const n = Number(m[1]);
+  // Zero days is read rather than refused, so "5 sales in 0 days" is turned
+  // down by the rule that knows what a window is for, naming the number.
+  if (!(n >= 0)) return null;
+  return Math.round(n * DAYS_IN[(m[2] ?? "d")[0]]);
+}
+
+/**
+ * How many sales to look at and how far back, from the words for it — either
+ * half on its own, or both: "5 sales in 60 days", "5 sales/60d", "5 in 60",
+ * "the last 3 months", "2 months", "5 sales".
+ *
+ * A half that is not named comes back null, and the caller fills it in from
+ * the run's own rule: a tier band that says "in 3 months" keeps the run's
+ * count, one that says "5 sales" keeps the run's window. Null altogether when
+ * the words are neither.
+ */
+export function parseSalesWindow(text: string): { count: number | null; windowDays: number | null } | null {
+  const t = text.trim().toLowerCase().replace(/[-–—]/g, " ").replace(/\s+/g, " ")
+    .replace(/^(?:the\s+)?(?:last\s+|past\s+|recent\s+)/, "");
+  if (!t) return null;
+  let m: RegExpExecArray | null;
+  // "5 sales in 60 days", "5 in 60", "5 sales/60d" — both halves.
+  if ((m = /^(\d+)\s*(?:recent\s*)?(?:sales?)?\s*(?:\/|,)?\s*(?:in|within|inside|over|of|across)?\s*(?:the\s+)?(?:last\s+|past\s+)?(.+)$/.exec(t))) {
+    const windowDays = parseDuration(m[2]);
+    if (windowDays !== null) return { count: Number(m[1]), windowDays };
+  }
+  // "3 months", "60 days", "in 2 months" — a window and nothing else.
+  const only = parseDuration(t.replace(/^(?:in|within|inside|over)\s+/, ""));
+  if (only !== null) return { count: null, windowDays: only };
+  // "5 sales" — a count and nothing else.
+  if ((m = /^(\d+)\s*(?:recent\s*)?sales?$/.exec(t))) return { count: Number(m[1]), windowDays: null };
+  return null;
+}
+
+/**
+ * The fewest sales a rule will settle for, from the words for it: "min 3",
+ * "at least 3", "must have at least 3 sales", "needs 5 sales". Null when the
+ * words are not that.
+ */
+export function parseNeed(text: string): number | null {
+  const m = /^(?:min(?:imum)?|at least|needs?|requires?|must have(?: at least)?)\s*(\d+)\s*(?:recent\s*)?(?:sales?)?(?:\s+recorded)?$/i
+    .exec(text.trim().replace(/\s+/g, " "));
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * A sales rule from one line: "5 sales in 60 days", or "5 sales in 60 days,
+ * at least 3" when fewer will do. The words are optional either side of the
+ * numbers — "5 in 60", "5 sales within the last 60 days", "5 sales/2 months"
+ * all read the same — but both numbers have to be there, so a half-typed box
+ * is an error rather than a guess.
  */
 export function parseSalesRule(text: string): SalesRule {
-  const t = text.trim().toLowerCase().replace(/[-–—]/g, " ").replace(/\s+/g, " ");
-  const m = /^(\d+)\s*(?:sales?)?\s*(?:\/|,)?\s*(?:in|within|inside|over|of|across)?\s*(?:the\s+)?(?:last\s+|past\s+)?(\d+)\s*(?:d|days?)?$/.exec(t);
-  if (!m) throw new Error(`cannot read the sales rule "${text}": want "<how many> sales in <how many> days", e.g. "5 sales in 60 days"`);
-  const count = Number(m[1]);
-  const windowDays = Number(m[2]);
-  if (!Number.isInteger(count) || count < 1) throw new Error(`"${text}": a sales rule needs at least 1 sale`);
-  if (!Number.isInteger(windowDays) || windowDays < 1) throw new Error(`"${text}": a sales rule needs a window of at least 1 day`);
-  return { count, windowDays };
+  const parts = text.split(/[,;]/).map((part) => part.trim()).filter(Boolean);
+  const window = parseSalesWindow(parts.shift() ?? "");
+  if (!window || window.count === null || window.windowDays === null) {
+    throw new Error(`cannot read the sales rule "${text}": want "<how many> sales in <how long>", e.g. "5 sales in 60 days"`);
+  }
+  const rule: SalesRule = { count: window.count, windowDays: window.windowDays };
+  for (const part of parts) {
+    const need = parseNeed(part);
+    if (need === null) throw new Error(`cannot read "${part}" in the sales rule "${text}": want "at least 3"`);
+    rule.need = need;
+  }
+  if (!Number.isInteger(rule.count) || rule.count < 1) throw new Error(`"${text}": a sales rule needs at least 1 sale`);
+  if (!Number.isInteger(rule.windowDays) || rule.windowDays < 1) throw new Error(`"${text}": a sales rule needs a window of at least 1 day`);
+  if (rule.need !== undefined && (rule.need < 1 || rule.need > rule.count)) {
+    throw new Error(`"${text}": it cannot need ${rule.need} sales when it only looks at ${rule.count}`);
+  }
+  return rule;
 }
 
 /** A sales rule as one line, the way parseSalesRule() reads it back. */
 export function formatSalesRule(rule: SalesRule = activeSalesRule): string {
-  return `${rule.count} sales in ${rule.windowDays} days`;
+  const base = `${rule.count} sales in ${rule.windowDays} days`;
+  return rule.need !== undefined && rule.need !== rule.count ? `${base}, at least ${rule.need}` : base;
 }
 
 // ── The basis rule ────────────────────────────────────────────────────────────
@@ -242,6 +331,53 @@ export function applyBasis(rule: BasisRule, prices: number[]): number | null {
   }
 }
 
+// ── The recipe ────────────────────────────────────────────────────────────────
+
+/**
+ * A sales rule and a basis rule together — everything it takes to turn a
+ * card's sales history into the one price a percentage multiplies.
+ *
+ * Every field is optional and every one that is left out is the run's own:
+ * this is what a tier band overrides, not a whole new set of settings. A band
+ * that says nothing prices exactly the way the run does, which is why a table
+ * written before any of this existed still means what it always meant.
+ *
+ * `altValue` is the one thing that is not a sale at all: Card Uploader's own
+ * estimate for the cert, which is there whether the card has sold lately or
+ * not. A band priced off it ignores the sales and the window with them.
+ */
+export type PriceRecipe = {
+  basis?: BasisRule;
+  count?: number;
+  windowDays?: number;
+  need?: number;
+  altValue?: boolean;
+};
+
+/** A recipe with the run's own settings filled in where it named none. */
+export function resolveRecipe(recipe: PriceRecipe = {}, run: SalesRule = activeSalesRule, runBasis: BasisRule = activeBasis): {
+  basis: BasisRule;
+  rule: SalesRule & { need: number };
+} {
+  const count = recipe.count ?? run.count;
+  const windowDays = recipe.windowDays ?? run.windowDays;
+  // A band that names its own count and no minimum wants all of them; one
+  // that names neither keeps whatever the run settles for.
+  const asked = recipe.need ?? (recipe.count !== undefined ? count : needSales(run));
+  return { basis: recipe.basis ?? runBasis, rule: { count, windowDays, need: Math.min(asked, count) } };
+}
+
+/** A recipe as the words a tier band is written with, or "" when it is the run's own. */
+export function formatRecipe(recipe: PriceRecipe = {}): string {
+  if (recipe.altValue) return " of alt value";
+  const parts: string[] = [];
+  if (recipe.basis) parts.push(` of ${formatBasis(recipe.basis)}`);
+  if (recipe.count !== undefined && recipe.windowDays !== undefined) parts.push(` in ${recipe.count} sales/${recipe.windowDays}d`);
+  else if (recipe.windowDays !== undefined) parts.push(` in ${recipe.windowDays} days`);
+  else if (recipe.count !== undefined) parts.push(` in ${recipe.count} sales`);
+  return parts.join("");
+}
+
 // ── Pricing ───────────────────────────────────────────────────────────────────
 
 /**
@@ -255,6 +391,24 @@ export function recentSales(sales: Sale[], count = minSales()): Sale[] {
     .filter((s) => s.price > 0)
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
     .slice(0, count);
+}
+
+/**
+ * The sales a rule actually prices from: priced, inside its window, newest
+ * first, at most as many as it looks at.
+ *
+ * Where recentSales() takes the newest few whatever their age and leaves the
+ * window to the gate, this throws the old ones out first. The two agree
+ * whenever the gate passes — a rule that needs all of its sales inside the
+ * window has the same few either way — and differ only for a rule that will
+ * settle for fewer, which is the point of it.
+ */
+export function salesIn(sales: Sale[], rule: SalesRule = activeSalesRule, now = new Date()): Sale[] {
+  const cutoff = now.getTime() - rule.windowDays * 86_400_000;
+  return [...sales]
+    .filter((s) => s.price > 0 && new Date(s.date).getTime() >= cutoff)
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, rule.count);
 }
 
 /**
@@ -295,20 +449,23 @@ export function salesMedian(sales: Sale[], count = minSales()): number | null {
  * price comes from, so an older one sitting behind them is neither used nor
  * held against the lot.
  */
-export function salesGate(sales: Sale[], now = new Date()): { ok: boolean; reason?: string; oldestDays: number | null } {
-  const want = minSales();
-  const windowDays = salesWindowDays();
-  const recent = recentSales(sales, want);
-  if (recent.length === 0) return { ok: false, reason: "no sales history", oldestDays: null };
+export function salesGate(sales: Sale[], now = new Date(), rule: SalesRule = activeSalesRule): { ok: boolean; reason?: string; oldestDays: number | null } {
+  const want = needSales(rule);
+  const newest = recentSales(sales, rule.count);
+  if (newest.length === 0) return { ok: false, reason: "no sales history", oldestDays: null };
 
-  const ages = recent.map((s) => (now.getTime() - new Date(s.date).getTime()) / 86_400_000);
-  const oldestDays = Math.round(Math.max(...ages));
+  const age = (s: Sale) => (now.getTime() - new Date(s.date).getTime()) / 86_400_000;
+  const oldestDays = Math.round(Math.max(...newest.map(age)));
+  const inWindow = salesIn(sales, rule, now);
 
-  if (recent.length < want) {
-    return { ok: false, reason: `only ${recent.length} recent sale(s), need ${want}`, oldestDays };
+  if (inWindow.length < want) {
+    if (newest.length < want) return { ok: false, reason: `only ${newest.length} recent sale(s), need ${want}`, oldestDays };
+    // A rule that wants all of its sales says so the short way, naming the
+    // one that is too old; a rule that would settle for fewer has to say how
+    // many it actually found.
+    return want === rule.count
+      ? { ok: false, reason: `oldest of the last ${want} sales is ${oldestDays}d old, window is ${rule.windowDays}d`, oldestDays }
+      : { ok: false, reason: `only ${inWindow.length} of the last ${rule.count} sales are inside ${rule.windowDays}d, need ${want}`, oldestDays };
   }
-  if (oldestDays > windowDays) {
-    return { ok: false, reason: `oldest of the last ${want} sales is ${oldestDays}d old, window is ${windowDays}d`, oldestDays };
-  }
-  return { ok: true, oldestDays };
+  return { ok: true, oldestDays: Math.round(Math.max(...inWindow.map(age))) };
 }

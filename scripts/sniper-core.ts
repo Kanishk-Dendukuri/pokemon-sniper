@@ -46,13 +46,16 @@
  * house where each lot really stands, and still sends nothing.
  *
  * Stages:
- *   1. The venue's scan: every live PSA/CGC 7–10 Pokémon lot in the auction
+ *   1. The venue's scan: every live PSA/CGC Pokémon lot in the auction
  *      about to close, with its cert number, title, grade and current bid.
  *   2. The chase-list filter on the title, at a house that has one (Fanatics:
  *      a Weekly Auction is twelve thousand Pokémon lots, most of them bulk; at
  *      Alt every PSA/CGC Pokémon lot in the cycle is a candidate), plus a
  *      block list for things that are graded but are not Pokémon TCG cards
- *      (Topps, Carddass, old maid...).
+ *      (Topps, Carddass, old maid...), a card number in the title, and for
+ *      CGC a number grade on the slab and none of that grader's own block
+ *      list (energies, insert cards). What survives is worked down full arts
+ *      first, cheapest first.
  *   3. Card Uploader, in two stages, over one batch of candidates at a time.
  *      Every candidate in the batch is priced straight off its cert through
  *      /backend/card-price/cert, which answers for any cert and costs no
@@ -63,11 +66,18 @@
  *      name, set, number, language, population — which is what card_key and the
  *      per-card cap are built from. The batch is deleted afterwards;
  *      a left-over from a crashed run is swept up at the start of the next.
- *   4. Bid maths. What the card is worth is the basis rule worked on its most
- *      recent sales — by default the second-lowest of five: not the average,
- *      which is a bid that only breaks even, and not the lowest, which one
- *      wrong comp could sink. A run may be given another basis and another
- *      sales rule (--value-basis, --sales-rule; see ./cert-price).
+ *   4. Bid maths, in two turns. What the card is worth is the basis rule
+ *      worked on its most recent sales — by default the second-lowest of
+ *      five: not the average, which is a bid that only breaks even, and not
+ *      the lowest, which one wrong comp could sink. That figure picks the
+ *      band, and is worked on the widest net the whole table casts, so a
+ *      table whose bands want different evidence still has one answer for
+ *      which band a card is in; with too few sales for even that, the card's
+ *      alt value picks it. The band then prices the card its own way — its
+ *      own basis, window and minimum, where it named any — and its rule
+ *      multiplies that. A run may be given another basis and another sales
+ *      rule for the bands that name none (--value-basis, --sales-rule; see
+ *      ./cert-price).
  *      A lot is worth a bid when the cert resolved, those sales all fall
  *      inside the window, neither that price nor the median
  *      of the same sales is a value no pack can award (the sourcing check:
@@ -99,18 +109,32 @@
  *   --budget=10000        a ceiling on what this run may hold at once, all-in
  *                         — not a target; the bids go on down the list as far
  *                         as it reaches. Bids already on the account do not
- *                         count against it (default $10,000)
+ *                         count against it (default $10,000). A grader may
+ *                         have a purse of its own under it, written in the
+ *                         same box — "10000, PSA 6000, CGC 1500" — or with
+ *                         --budget-psa / --budget-cgc; a lot stops when
+ *                         either its grader's purse or the run's is out
  *   --fire-after=27       minutes after extended bidding opens to put the
  *                         bids on; the FIRE_AFTER_MINUTES environment variable
  *                         does the same, for a workflow input (default: the
  *                         venue's own — Fanatics 27, Alt 100)
  *   --tiers-psa=…         the tier table for PSA, and --tiers-cgc=… for CGC,
  *                         written as "$7.50-8: flat $5, $8-10: market - $3,
- *                         $10-90: 85%, $90-450: 80%" (see TierTable); the
- *                         TIERS_PSA / TIERS_CGC environment variables do the
- *                         same, for a workflow input. Default: DEFAULT_TIERS
- *   --value-basis="2nd lowest"  how a card's recent sales become the one price
- *                         the tier tables' percentages multiply: "lowest",
+ *                         $10-90: 85%, $90-450: 80%" — or, where a band is to
+ *                         price its own way, "$30-100: 85% of 2nd lowest in
+ *                         3 months, min 3, round up, else 80% of alt value"
+ *                         (see parseTiers). A line may open with
+ *                         "grades 1-10" to set that grader's grade range.
+ *                         The TIERS_PSA / TIERS_CGC environment variables do
+ *                         the same, for a workflow input. A grader given no
+ *                         table is not bid on at all
+ *   --psa-grades=1-10     the grades to scan, per grader, and --cgc-grades=…
+ *                         for CGC; PSA_GRADES / CGC_GRADES do the same. The
+ *                         tier box's "grades 1-10" is the usual way in
+ *                         (default: every grade, 1–10 in half steps)
+ *   --value-basis="2nd lowest"  the basis for any band that does not name one
+ *                         of its own: how a card's recent sales become the
+ *                         one price the percentages multiply — "lowest",
  *                         "2nd lowest", "3rd lowest", "average of the 2
  *                         lowest", "average of the 3 lowest", "drop the
  *                         lowest and the highest, average the rest",
@@ -118,17 +142,20 @@
  *                         ./cert-price). The VALUE_BASIS environment variable
  *                         does the same, for a workflow input. Default:
  *                         DEFAULT_BASIS, the second-lowest
- *   --sales-rule="5 sales in 60 days"  how many recent sales a price is
- *                         worked from and how old the oldest may be; it gates
- *                         the lot as well as feeding the basis, so a wider
- *                         window lets more lots through and prices them off
- *                         older sales. SALES_RULE does the same
- *                         (default DEFAULT_SALES_RULE)
+ *   --sales-rule="5 sales in 60 days"  the same, for the sales: how many a
+ *                         price is worked from and how old the oldest may be.
+ *                         It gates the lot as well as feeding the basis, so a
+ *                         wider window lets more lots through and prices them
+ *                         off older sales; ", at least 3" settles for fewer.
+ *                         SALES_RULE does the same (default
+ *                         DEFAULT_SALES_RULE)
  *   --max-copies-per-card=4  the most lots of one card to be winning or have
  *                         won at once, counted across every grade and both
  *                         graders; the MAX_COPIES_PER_CARD environment
  *                         variable does the same, for a workflow input
- *                         (default DEFAULT_MAX_COPIES_PER_CARD)
+ *                         (default DEFAULT_MAX_COPIES_PER_CARD). A grader may
+ *                         have a cap of its own over its own copies, in the
+ *                         same box — "6, CGC 4" — or with --max-copies-cgc
  *   --count-existing-bids charge the bids already on the account to --budget:
  *                         a $2,000 run finding $600 of open bids on the
  *                         account has $1,400 to spend, not $2,000. Those lots
@@ -198,19 +225,27 @@ import {
   basisRule,
   bidBasis,
   formatBasis,
+  formatRecipe,
   formatSalesRule,
   marketPrice,
   minSales,
+  needSales,
   parseBasis,
+  parseDuration,
+  parseNeed,
   parseSalesRule,
+  parseSalesWindow,
   recentSales,
+  resolveRecipe,
   salesGate,
+  salesIn,
   salesMedian,
   salesRule,
   salesWindowDays,
   setBasis,
   setSalesRule,
   type BasisRule,
+  type PriceRecipe,
   type Sale,
   type SalesRule,
 } from "./cert-price";
@@ -221,9 +256,11 @@ export { BUYERS_PREMIUM, buyersPremium, setBuyersPremium };
 // ./cert-price, which scripts/verify-prices.ts reads too; every caller of the
 // sniper reads them from here, as they always have.
 export {
-  DEFAULT_BASIS, DEFAULT_SALES_RULE, applyBasis, basisRule, bidBasis, formatBasis, formatSalesRule,
-  marketPrice, minSales, parseBasis, parseSalesRule, recentSales, salesGate, salesMedian, salesRule,
-  salesWindowDays, setBasis, setSalesRule, type BasisRule, type Sale, type SalesRule,
+  DEFAULT_BASIS, DEFAULT_SALES_RULE, applyBasis, basisRule, bidBasis, formatBasis, formatRecipe,
+  formatSalesRule, marketPrice, minSales, needSales, parseBasis, parseDuration, parseNeed,
+  parseSalesRule, parseSalesWindow, recentSales, resolveRecipe, salesGate, salesIn, salesMedian,
+  salesRule, salesWindowDays, setBasis, setSalesRule,
+  type BasisRule, type PriceRecipe, type Sale, type SalesRule,
 };
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -232,8 +269,78 @@ export {
 export const GRADERS = ["PSA", "CGC"] as const;
 export type Grader = (typeof GRADERS)[number];
 
-/** The grades chased; 7–10 is every half-step from 7 up. */
-export const GRADES = [7, 7.5, 8, 8.5, 9, 9.5, 10];
+
+/**
+ * Every grade a slab can carry, low to high. It ran 7–10 until 2026-09-20,
+ * when the floor came off: a $12 card in a PSA 4 is priced off PSA 4 comps
+ * like any other, and the tier table is what decides whether it is worth a
+ * bid. GRADE_RANGES is what a run actually scans.
+ */
+export const GRADES = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10];
+
+export type GradeRange = { min: number; max: number };
+
+/** Every grade, both graders — what a run scans unless it is told narrower. */
+export const DEFAULT_GRADE_RANGES: Record<Grader, GradeRange> = {
+  PSA: { min: 1, max: 10 },
+  CGC: { min: 1, max: 10 },
+};
+
+/** "1-10", "7–10", "7 to 10", or a single "10". */
+export function parseGradeRange(text: string): GradeRange {
+  const t = text.trim().replace(/[–—]/g, "-");
+  const m = /^(\d{1,2}(?:\.5)?)\s*(?:-|to)\s*(\d{1,2}(?:\.5)?)$/.exec(t) ?? (/^\d{1,2}(?:\.5)?$/.test(t) ? [t, t, t] : null);
+  if (!m) throw new Error(`cannot read the grade range "${text}": want "1-10" or "7-10"`);
+  const min = Number(m[1]);
+  const max = Number(m[2]);
+  if (!(min >= 1 && max <= 10 && min <= max)) throw new Error(`"${text}": grades run 1 to 10, low to high`);
+  return { min, max };
+}
+
+export function formatGradeRange(r: GradeRange): string {
+  return r.min === r.max ? String(r.min) : `${r.min}–${r.max}`;
+}
+
+/** Whether this slab is inside the run's range for its grader. */
+export function gradeAllowed(grader: string, grade: number | undefined, ranges: Record<Grader, GradeRange>): boolean {
+  if (grade === undefined || !GRADERS.includes(grader as Grader)) return false;
+  const r = ranges[grader as Grader];
+  return grade >= r.min && grade <= r.max;
+}
+
+/**
+ * The grades a run scans, per grader: --psa-grades / --cgc-grades, else
+ * PSA_GRADES / CGC_GRADES in the environment (the workflow boxes), else the
+ * defaults handed in. A range that cannot be read stops the run before the
+ * scan.
+ */
+export function gradeRangesFrom(
+  defaults: Record<Grader, GradeRange>,
+  env: Record<string, string | undefined> = process.env,
+): Record<Grader, GradeRange> {
+  const ranges = {} as Record<Grader, GradeRange>;
+  for (const grader of GRADERS) {
+    ranges[grader] = parseGradeRange(opt(`${grader.toLowerCase()}-grades`, env[`${grader}_GRADES`] || formatGradeRange(defaults[grader])));
+  }
+  return ranges;
+}
+
+let activeGradeRanges: Record<Grader, GradeRange> = DEFAULT_GRADE_RANGES;
+
+/** The grades this run scans. */
+export function gradeRanges(): Record<Grader, GradeRange> {
+  return activeGradeRanges;
+}
+
+/** Scan these grades from now on — what --psa-grades / --cgc-grades do. */
+export function setGradeRanges(ranges: Record<Grader, GradeRange>): void {
+  activeGradeRanges = ranges;
+}
+
+/** The grades on the ladder inside this range. */
+export function gradesIn(range: GradeRange): number[] {
+  return GRADES.filter((g) => g >= range.min && g <= range.max);
+}
 
 /**
  * The most to pay for a lot, by what its card is worth: the tier table.
@@ -279,7 +386,28 @@ export type BidRule =
   /** Bid what the card is worth less this, premium on top. */
   | { kind: "offset"; less: number };
 
-export type TierBand = { upTo: number; rule: BidRule };
+/**
+ * What a band does when its own sales requirement is not met: nothing, or
+ * a share of the card's alt value — Card Uploader's estimate for the cert,
+ * which is there whether the card has sold lately or not.
+ */
+export type Fallback =
+  | { kind: "none" }
+  | { kind: "alt-value"; share: number };
+
+export type TierBand = {
+  upTo: number;
+  rule: BidRule;
+  /**
+   * How this band works out what the card is worth, where that is not the
+   * run's own way. Only what the band named is here; the rest is the run's.
+   */
+  pricing?: PriceRecipe;
+  /** Whole dollars: down, unless the band says up. */
+  round?: "up" | "down";
+  /** What the band does when its sales requirement is not met. */
+  fallback?: Fallback;
+};
 export type GraderTiers = { floor: number; bands: TierBand[] };
 export type TierTable = Record<Grader, GraderTiers>;
 
@@ -343,14 +471,24 @@ export function ruleText(rule: BidRule): string {
   }
 }
 
+const pct = (share: number) => `${Math.round(share * 1000) / 10}%`;
+
+/** A fallback as the words a band is written with. */
+export function fallbackText(back: Fallback): string {
+  return back.kind === "none" ? "else none" : `else ${pct(back.share)} of alt value`;
+}
+
 /** A grader's table as one line, the way parseTiers() reads it back. */
 export function formatTiers(tiers: GraderTiers): string {
   if (tiers.bands.length === 0) return "off — nothing of this grader's is bid on";
   let from = tiers.floor;
   return tiers.bands.map((b) => {
-    const text = `$${from}-${b.upTo}: ${ruleText(b.rule)}`;
+    const clauses = [`$${from}-${b.upTo}: ${ruleText(b.rule)}${formatRecipe(b.pricing)}`];
+    if (b.pricing?.need !== undefined) clauses.push(`min ${b.pricing.need}`);
+    if (b.round === "up") clauses.push("round up");
+    if (b.fallback) clauses.push(fallbackText(b.fallback));
     from = b.upTo;
-    return text;
+    return clauses.join(", ");
   }).join(", ");
 }
 
@@ -374,19 +512,117 @@ function parseRule(text: string, band: string): BidRule {
   throw new Error(`cannot read the rule "${text}" in "${band}": want "flat $5", "market - $3" or "85%"`);
 }
 
+const BAND_START = /^\$?\s*[\d.]+\s*[-–—]\s*\$?\s*[\d.]+\s*:/;
+const CLAUSE_START = /^(?:min\b|minimum\b|at least\b|needs?\b|requires?\b|must have\b|round(?:ed|s)?\b|else\b|otherwise\b)/i;
+
 /**
- * A grader's table from one line: "$7.50-8: flat $5, $8-10: market - $3,
- * $10-90: 85%, $90-450: 80%". Bands are separated by commas or semicolons,
- * have to run upward and touch, and the first one's start is the floor.
- * Anything it cannot read is an error naming the band, not a guess.
+ * A comma-separated line cut into pieces, where a comma inside a piece does
+ * not start a new one.
+ *
+ * A band is written with commas in it — "min 3, round up, else 90% of alt
+ * value" — and the bands themselves are separated by commas too, so the
+ * separator alone cannot say which is which. What says it is the shape: a
+ * band opens with "$30-100:" and a clause opens with one of a handful of
+ * words. Anything else is the tail of the piece before it and is glued back
+ * on, which is also how a basis with a comma in it — "drop the lowest and
+ * the highest, average the rest" — survives the split.
+ */
+function cutOn(text: string, opens: RegExp, separators = /[,;]/): string[] {
+  const out: string[] = [];
+  for (const piece of text.split(separators).map((p) => p.trim()).filter(Boolean)) {
+    if (out.length === 0 || opens.test(piece)) out.push(piece);
+    else out[out.length - 1] += `, ${piece}`;
+  }
+  return out;
+}
+
+/** "else none", "else 90% of alt value" — what a band does when its sales are not there. */
+function parseFallback(text: string, band: string): Fallback {
+  const t = text.trim().toLowerCase().replace(/\s+/g, " ").replace(/\.$/, "");
+  if (/^(?:none|nothing|no bid|do not bid|skip|drop|drop it)$/.test(t)) return { kind: "none" };
+  const m = /^([\d.]+)\s*%\s*(?:of\s+)?(?:the\s+)?(?:alt|book|estimated?)?\s*(?:value|estimate)$/.exec(t);
+  if (!m) throw new Error(`"${band}": cannot read the fallback "${text}" — want "else 90% of alt value" or "else none"`);
+  const share = Number(m[1]) / 100;
+  if (!(share > 0 && share <= 2)) throw new Error(`"${band}": a fallback share has to be between 0% and 200%`);
+  return { kind: "alt-value", share };
+}
+
+/**
+ * A band's opening clause: the rule, and where the price it works on comes
+ * from. "85%", "85% of 2nd lowest", "85% of 2nd lowest in 3 months",
+ * "95% of average of the 3 lowest in 5 sales/60 days", "flat $5",
+ * "market - $3", "80% of alt value".
+ *
+ * The window is taken off the end first and the basis next, so the "of" in
+ * "average of the 3 lowest" is never mistaken for the one that introduces the
+ * basis.
+ */
+function parseBandRule(text: string, band: string): { rule: BidRule; pricing: PriceRecipe } {
+  let head = text.trim();
+  const pricing: PriceRecipe = {};
+
+  let m = /^(.*?)\s+(?:in|within|inside|over)\s+(.+)$/i.exec(head);
+  if (m) {
+    const window = parseSalesWindow(m[2]);
+    if (!window) throw new Error(`"${band}": cannot read the sales window "${m[2]}" — want "3 months", "60 days" or "5 sales in 60 days"`);
+    if (window.count !== null) {
+      if (!Number.isInteger(window.count) || window.count < 1) throw new Error(`"${band}": a band needs to look at at least 1 sale`);
+      pricing.count = window.count;
+    }
+    if (window.windowDays !== null) {
+      if (!(window.windowDays >= 1)) throw new Error(`"${band}": a band needs a window of at least 1 day`);
+      pricing.windowDays = window.windowDays;
+    }
+    head = m[1].trim();
+  }
+
+  m = /^(.*?)\s+of\s+(.+)$/i.exec(head);
+  if (m) {
+    const basis = m[2].trim();
+    if (/^(?:the\s+)?(?:(?:alt|book|estimated)\s+value|estimate)$/i.test(basis)) pricing.altValue = true;
+    else {
+      try {
+        pricing.basis = parseBasis(basis);
+      } catch (err) {
+        throw new Error(`"${band}": ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    head = m[1].trim();
+  }
+
+  return { rule: parseRule(head, band), pricing };
+}
+
+/**
+ * A grader's table from one line.
+ *
+ * The short form is what it always was — "$7.50-8: flat $5, $8-10: market -
+ * $3, $10-90: 85%, $90-450: 80%": bands run upward, touch, and the first
+ * one's start is the floor. Every band prices the way the run does.
+ *
+ * The long form lets a band price its own way, which is the point of it —
+ * the cheap end of a table and the dear end rarely want the same evidence:
+ *
+ *     $1-30: 95% of average of the 3 lowest in 5 sales/60 days, min 3, round up, else 90% of alt value,
+ *     $30-100: 85% of 2nd lowest in 3 months, else 80% of alt value,
+ *     $100-500: 75% of lowest in 2 months,
+ *     $500-1000: 60% of lowest in 2 months, min 5
+ *
+ * After the rule a band may name, in this order and any of them left out:
+ * the basis ("of 2nd lowest", "of average of the 3 lowest", "of alt value"),
+ * the sales it works on ("in 3 months", "in 5 sales/60 days"), how few will
+ * do ("min 3"), which way a part-dollar goes ("round up"), and what happens
+ * when the sales are not there ("else 90% of alt value", "else none").
+ * Whatever a band does not name is the run's own --value-basis and
+ * --sales-rule. Anything it cannot read is an error naming the band.
  */
 export function parseTiers(text: string): GraderTiers {
-  const parts = text.split(/[,;]/).map((p) => p.trim()).filter(Boolean);
+  const parts = cutOn(text, BAND_START);
   if (parts.length === 0) throw new Error(`a tier table needs at least one band, got "${text}"`);
   let floor: number | null = null;
   const bands: TierBand[] = [];
   for (const part of parts) {
-    const m = /^\$?\s*([\d.]+)\s*[-–]\s*\$?\s*([\d.]+)\s*:\s*(.+)$/.exec(part);
+    const m = /^\$?\s*([\d.]+)\s*[-–—]\s*\$?\s*([\d.]+)\s*:\s*(.+)$/.exec(part);
     if (!m) throw new Error(`cannot read the band "${part}": want "<from>-<to>: <rule>", e.g. "$10-90: 85%"`);
     const from = Number(m[1]);
     const to = Number(m[2]);
@@ -394,7 +630,26 @@ export function parseTiers(text: string): GraderTiers {
     const previous = bands.length > 0 ? bands[bands.length - 1].upTo : null;
     if (previous === null) floor = from;
     else if (previous !== from) throw new Error(`the band "${part}" starts at $${from} but the one before it ends at $${previous} — bands have to touch`);
-    bands.push({ upTo: to, rule: parseRule(m[3].trim(), part) });
+
+    const clauses = cutOn(m[3].trim(), CLAUSE_START, /,/);
+    const { rule, pricing } = parseBandRule(clauses[0], part);
+    const band: TierBand = { upTo: to, rule };
+    for (const clause of clauses.slice(1)) {
+      const need = parseNeed(clause);
+      if (need !== null) { pricing.need = need; continue; }
+      let c: RegExpExecArray | null;
+      if ((c = /^round(?:ed|s)?\s*(up|down)(?:\s+to\s+the(?:\s+nearest)?(?:\s+whole)?\s+dollar)?$/i.exec(clause))) {
+        band.round = c[1].toLowerCase() as "up" | "down";
+        continue;
+      }
+      if ((c = /^(?:else|otherwise)\s+(.+)$/i.exec(clause))) { band.fallback = parseFallback(c[1], part); continue; }
+      throw new Error(`"${part}": cannot read "${clause}" — want "min 3", "round up" or "else 90% of alt value"`);
+    }
+    if (pricing.need !== undefined && pricing.count !== undefined && pricing.need > pricing.count) {
+      throw new Error(`"${part}": it cannot need ${pricing.need} sales when it only looks at ${pricing.count}`);
+    }
+    if (Object.keys(pricing).length > 0) band.pricing = pricing;
+    bands.push(band);
   }
   return { floor: floor as number, bands };
 }
@@ -404,27 +659,49 @@ export function parseTiers(text: string): GraderTiers {
  * variable, else the default. A table that cannot be read stops the run here,
  * before anything is scanned, with the grader and the band named.
  */
-export function tiersFromArgs(env: Record<string, string | undefined> = process.env): TierTable {
+export function tiersFromArgs(
+  env: Record<string, string | undefined> = process.env,
+  gradeDefaults: Record<Grader, GradeRange> = DEFAULT_GRADE_RANGES,
+): TierTable {
   // Off until a table is asked for. A blank box is not "the usual table" —
   // it is no bids at all, which is the only safe thing a blank box can mean
   // when the next thing it does is spend money. DEFAULT_TIERS is still the
   // table that was fitted, and what the workflow forms are pre-filled with.
   const table: TierTable = { CGC: TIERS_OFF, PSA: TIERS_OFF };
+  // A grade range named in a tier box is set on the way past; anything not
+  // named keeps whatever --psa-grades / --cgc-grades or the default says.
+  const ranges = gradeRangesFrom(gradeDefaults, env);
   for (const grader of GRADERS) {
     const text = opt(`tiers-${grader.toLowerCase()}`, env[`TIERS_${grader}`] ?? "").trim();
     if (!text) continue;
+    // "grades 1-10" at the head of the box, where the run wants this grader
+    // scanned at something other than the default. It rides in the tier box
+    // because a dispatch form takes ten inputs and this is the grader's own
+    // line already.
+    const withGrades = /^grades?\s+([^,;]+)\s*[,;]\s*([\s\S]+)$/i.exec(text.trim());
+    const onlyGrades = /^grades?\s+([^,;]+)$/i.exec(text.trim());
+    const rest = withGrades ? withGrades[2].trim() : onlyGrades ? "" : text;
+    const gradeText = withGrades?.[1] ?? onlyGrades?.[1];
+    if (gradeText !== undefined) {
+      try {
+        ranges[grader] = parseGradeRange(gradeText);
+      } catch (err) {
+        throw new Error(`the ${grader} tier table could not be read: ${err instanceof Error ? err.message : err}`);
+      }
+    }
     // "none" switches the grader off altogether. Blank is not the same
     // thing: blank means the table below, which does bid.
-    if (/^(?:none|off|no|skip)$/i.test(text)) {
+    if (!rest || /^(?:none|off|no|skip)$/i.test(rest)) {
       table[grader] = TIERS_OFF;
       continue;
     }
     try {
-      table[grader] = parseTiers(text);
+      table[grader] = parseTiers(rest);
     } catch (err) {
       throw new Error(`the ${grader} tier table could not be read: ${err instanceof Error ? err.message : err}`);
     }
   }
+  setGradeRanges(ranges);
   return table;
 }
 
@@ -439,6 +716,61 @@ export function tiersFromArgs(env: Record<string, string | undefined> = process.
  * copies are counted across every grade and both graders, so four PSA 9s and
  * a CGC 10 of the same card are five copies, not two piles.
  */
+/**
+ * A ceiling of its own for one grader, under the run's: --budget-psa=6000,
+ * --budget-cgc=1500, or BUDGET_PSA / BUDGET_CGC in the environment (the
+ * workflow boxes). A grader left blank spends the run's ceiling like any
+ * other, so this is how a run puts most of its money in one grader's slabs
+ * without having to bid two runs to do it.
+ *
+ * The purses do not have to add up to the run's ceiling, and it is the nearer
+ * of the two that binds: $6,000 of PSA and $1,500 of CGC under a $5,000
+ * ceiling spends $5,000, whichever graders it goes on.
+ */
+export function graderBudgetsFromArgs(env: Record<string, string | undefined> = process.env): Record<string, number> {
+  const purses: Record<string, number> = {};
+  for (const grader of GRADERS) {
+    const text = opt(`budget-${grader.toLowerCase()}`, env[`BUDGET_${grader}`] ?? "").trim();
+    if (!text) continue;
+    const dollars = Number(text);
+    if (!(dollars >= 0)) throw new Error(`--budget-${grader.toLowerCase()} must be a number of dollars, got "${text}"`);
+    purses[grader] = Math.round(dollars * 100);
+  }
+  return purses;
+}
+
+/**
+ * A number for the run, and a number for a grader, out of one box: "10000",
+ * or "10000, PSA 6000, CGC 1500". The workflow forms take ten inputs and no
+ * more, so a knob that is really one number per grader is written this way
+ * rather than spending three of them.
+ *
+ * Returns the run's figure and whatever graders were named; the flags
+ * (--budget-psa and the rest) still override what is here.
+ */
+export function parsePerGrader(text: string, what: string): { all: number; byGrader: Record<string, number> } {
+  const parts = text.split(/[,;]/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) throw new Error(`${what} cannot be blank`);
+  const byGrader: Record<string, number> = {};
+  let all: number | null = null;
+  for (const part of parts) {
+    const m = /^(?:([A-Za-z]+)\s*[:=]?\s*)?\$?\s*([\d.]+)$/.exec(part);
+    if (!m) throw new Error(`cannot read "${part}" in ${what}: want a number, or "PSA 6000"`);
+    const value = Number(m[2]);
+    if (!Number.isFinite(value) || value < 0) throw new Error(`"${part}" in ${what} is not a number`);
+    if (m[1] === undefined) {
+      if (all !== null) throw new Error(`${what} names the run's figure twice: "${text}"`);
+      all = value;
+      continue;
+    }
+    const grader = GRADERS.find((g) => g.toLowerCase() === m[1]!.toLowerCase());
+    if (!grader) throw new Error(`"${m[1]}" in ${what} is not a grader — want ${GRADERS.join(" or ")}`);
+    byGrader[grader] = value;
+  }
+  if (all === null) throw new Error(`${what} needs a figure for the run itself, not only per grader: "${text}"`);
+  return { all, byGrader };
+}
+
 export const DEFAULT_MAX_COPIES_PER_CARD = 4;
 
 let activeMaxCopies = DEFAULT_MAX_COPIES_PER_CARD;
@@ -461,11 +793,40 @@ export function setMaxCopiesPerCard(copies: number): void {
 export function maxCopiesFromArgs(env: Record<string, string | undefined> = process.env): number {
   const text = opt("max-copies-per-card", env.MAX_COPIES_PER_CARD ?? "").trim();
   if (!text) return DEFAULT_MAX_COPIES_PER_CARD;
-  const copies = Number(text);
+  const copies = parsePerGrader(text, "--max-copies-per-card").all;
   if (!Number.isInteger(copies) || copies < 1) {
     throw new Error(`--max-copies-per-card must be a whole number of at least 1, got "${text}"`);
   }
   return copies;
+}
+
+/**
+ * A per-card cap of its own for one grader: --max-copies-cgc=4, or
+ * MAX_COPIES_CGC in the environment (the workflow box). Counted over that
+ * grader's copies alone, so four CGC copies of a card and four PSA ones are
+ * eight lots; the run's own --max-copies-per-card still caps the card across
+ * both. A grader left blank is held to that alone.
+ */
+export function graderCopyCapsFromArgs(env: Record<string, string | undefined> = process.env): Record<string, number> {
+  const caps: Record<string, number> = {};
+  // "4, CGC 4" in the one box, and the flags below still win over it.
+  const box = opt("max-copies-per-card", env.MAX_COPIES_PER_CARD ?? "").trim();
+  if (box) Object.assign(caps, parsePerGrader(box, "--max-copies-per-card").byGrader);
+  for (const grader of GRADERS) {
+    const text = opt(`max-copies-${grader.toLowerCase()}`, env[`MAX_COPIES_${grader}`] ?? "").trim();
+    if (!text) continue;
+    const copies = Number(text);
+    if (!Number.isInteger(copies) || copies < 1) {
+      throw new Error(`--max-copies-${grader.toLowerCase()} must be a whole number of at least 1, got "${text}"`);
+    }
+    caps[grader] = copies;
+  }
+  for (const [grader, copies] of Object.entries(caps)) {
+    if (!Number.isInteger(copies) || copies < 1) {
+      throw new Error(`the ${grader} copy cap must be a whole number of at least 1, got "${copies}"`);
+    }
+  }
+  return caps;
 }
 
 /**
@@ -776,14 +1137,75 @@ export const BLOCK_LIST: RegExp[] = [
   /\blot of\b/i,
 ];
 
+/**
+ * Blocked for CGC only.
+ *
+ * CGC slabs a great deal that PSA never sees, and the Weekly Auction is full
+ * of it at $6 a lot: basic energies, the insert cards that come in a battle
+ * set, sticker sheets, Old Maid decks. None of them is a card anyone is
+ * buying, and a $6 lot priced off three $6 comps passes every other gate.
+ * Energies and insert cards are here rather than in BLOCK_LIST because that
+ * one is shared, and a PSA-graded energy is at least a card somebody slabbed
+ * on purpose. Say the word and they move up.
+ */
+export const CGC_BLOCK_LIST: RegExp[] = [
+  /\benerg(?:y|ies)\b/i,
+  /\binsert[\s-]?cards?\b/i,
+  /\bhow[\s-]?to[\s-]?play\b/i,
+  /\btrainer[\s-]?tips\b/i,
+];
+
+/**
+ * A CGC slab with no number on it.
+ *
+ * CGC will authenticate a card without grading it, and the slab comes back
+ * reading AUTHENTIC — genuine, and nothing said about its condition. There is
+ * no tier band for that and no comp set worth the name, so it is not bid on.
+ */
+export function cgcUngraded(lot: Graded): string | null {
+  if (/\bauthentic(?:ated)?\b/i.test(lot.title)) return "CGC Authentic — no number grade";
+  if (!(typeof lot.grade === "number" && lot.grade > 0)) return "no number grade on the slab";
+  return null;
+}
+
+/**
+ * How a Pokémon card's number is written in a listing title: "186/196",
+ * "#186", "SWSH284", "TG20", "SV-P 001", or the word promo for the ones that
+ * carry a promo number instead.
+ *
+ * A slab with none of these is not a card with an identity: the energies,
+ * insert cards, sticker sheets and playing-card decks that fill the cheap end
+ * of an auction are exactly the lots whose titles have no number in them,
+ * because the things themselves have none.
+ */
+export const CARD_NUMBER: RegExp[] = [
+  /\b\d{1,3}\s*\/\s*\d{1,3}\b/,
+  /#\s*[A-Za-z]{0,6}-?\s?\d{1,3}\b/,
+  /\b[A-Z]{2,6}\d{1,3}\b/,
+  /\b[A-Z]{1,3}-P\s?\d{1,3}\b/,
+  /\b(?:TG|GG|SV|SWSH|SM|XY)\d{1,3}\b/i,
+  /\bpromos?\b/i,
+];
+
+/** Whether the title carries a card number of some kind. */
+export function hasCardNumber(title: string): boolean {
+  return CARD_NUMBER.some((re) => re.test(title));
+}
+
+/** The graders a venue asks the chase list about, in GRADERS order. */
+export function chasedGraders(asked: boolean | Partial<Record<Grader, boolean>>): Grader[] {
+  return GRADERS.filter((grader) => (typeof asked === "boolean" ? asked : asked[grader] ?? true));
+}
+
 /** Every chase-list entry the title satisfies, in list order. */
 export function matchKeywords(title: string): string[] {
   return CHASE_LIST.filter((k) => k.test(title)).map((k) => k.name);
 }
 
-/** The block-list pattern the title trips, if any. */
-export function blockedBy(title: string): string | null {
-  const hit = BLOCK_LIST.find((re) => re.test(title));
+/** The block-list pattern the title trips, if any — the grader's own list included. */
+export function blockedBy(title: string, grader?: string): string | null {
+  const lists = grader === "CGC" ? [...BLOCK_LIST, ...CGC_BLOCK_LIST] : BLOCK_LIST;
+  const hit = lists.find((re) => re.test(title));
   return hit ? hit.source : null;
 }
 
@@ -813,22 +1235,39 @@ export function masterBallAllowed(lot: Graded): boolean {
 }
 
 /**
- * Where a lot sits in the order lots are worked down, lowest first: every PSA
- * slab from 10 down to 7, then CGC Pristine 10, then CGC Gem Mint 10, then CGC
- * 9.5 down to 7. Half-grades take their place in the run.
+ * The full-art family: the cards a set is chased for, whatever the printing
+ * is called this generation. AR, SAR, SIR and IR are the Japanese codes for
+ * the same thing and are matched case-sensitively, so "ar" inside a name
+ * never counts.
+ */
+export const FULL_ART: RegExp[] = [
+  /\bfull[\s-]?art\b/i,
+  /\balt(?:ernate)?[\s-]?art\b/i,
+  /\bspecial[\s-]?illustration(?:[\s-]?rare)?\b/i,
+  /\billustration[\s-]?rare\b/i,
+  /\bFA\b/,
+  /\bAR\b/,
+  /\bSAR\b/,
+  /\bSIR\b/,
+  /\bIR\b/,
+];
+
+/** Whether this lot is a full art, by its title. */
+export function isFullArt(lot: Pick<Graded, "title">): boolean {
+  return FULL_ART.some((re) => re.test(lot.title));
+}
+
+/**
+ * Where a lot sits in the order lots are worked down, lowest first: the full
+ * arts, then everything else. Price breaks the tie, cheapest first, wherever
+ * this is used — a ceiling walked cheapest-first buys the most lots it can.
  *
- * It decides two things — which certs the --max-cards budget is spent on, and
- * the order of the rows in the CSV.
+ * It decides three things — which certs the --max-cards budget is spent on,
+ * the order of the rows in the CSV, and the order the bids go on in, which is
+ * the order the budget is spent in.
  */
 export function priorityRank(lot: Graded): number {
-  const grade = lot.grade ?? 0;
-  const band =
-    lot.gradingService === "PSA" ? 0
-      : grade === 10 ? (isPristine(lot) ? 1 : 2)
-        : 3;
-  // Grades run 7–10 in half steps, so the grade part spans 0–6 and a band
-  // never reaches into the next.
-  return band * 10 + (10 - grade) * 2;
+  return isFullArt(lot) ? 0 : 1;
 }
 
 // ── Card identity ─────────────────────────────────────────────────────────────
@@ -850,17 +1289,29 @@ export function cardKey(parts: { cardName: string; setName: string; cardNumber: 
 
 // ── Bid maths ─────────────────────────────────────────────────────────────────
 
-/** The rule for a card worth `price` at this grader, or null outside the table. */
-export function tierFor(grader: Grader, price: number, table: TierTable = tierTable()): BidRule | null {
+/** The band a card worth `price` falls in at this grader, or null outside the table. */
+export function bandFor(grader: Grader, price: number, table: TierTable = tierTable()): TierBand | null {
   const { floor, bands } = table[grader];
   if (!(price >= floor)) return null;
   for (const [i, band] of bands.entries()) {
     // "$90–450" reads as inclusive at the top; every other boundary is the
     // next band's floor.
     const last = i === bands.length - 1;
-    if (last ? price <= band.upTo : price < band.upTo) return band.rule;
+    if (last ? price <= band.upTo : price < band.upTo) return band;
   }
   return null;
+}
+
+/** The rule for a card worth `price` at this grader, or null outside the table. */
+export function tierFor(grader: Grader, price: number, table: TierTable = tierTable()): BidRule | null {
+  return bandFor(grader, price, table)?.rule ?? null;
+}
+
+/** A band as the table writes it — "$30-100" — for a reason that has to name one. */
+export function bandLabel(grader: Grader, band: TierBand, table: TierTable = tierTable()): string {
+  const { floor, bands } = table[grader];
+  const i = bands.indexOf(band);
+  return `$${i <= 0 ? floor : bands[i - 1].upTo}-${band.upTo}`;
 }
 
 /** The least a card can be worth and still be bid on at this grader. */
@@ -887,11 +1338,17 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 export function applyRule(
   tier: BidRule,
   price: number,
+  round: "up" | "down" = "down",
 ): { rule: string; share: number | null; allIn: number; hammer: number } | null {
   let share: number | null = null;
   let rule: string;
   let hammer: number;
   let allIn: number;
+  // Down unless the band says up. Up is the band's to ask for and costs at
+  // most the odd dollar over the rule: a $28.40 max becomes $29, which on a
+  // house that takes whole dollars is the difference between losing a lot by
+  // sixty cents and winning it.
+  const whole = round === "up" ? Math.ceil : Math.floor;
 
   switch (tier.kind) {
     case "flat":
@@ -901,29 +1358,160 @@ export function applyRule(
       break;
     case "offset":
       rule = `market - $${tier.less}`;
-      hammer = Math.floor(price - tier.less);
+      hammer = whole(price - tier.less);
       allIn = round2(hammer * (1 + buyersPremium()));
       break;
     case "share":
       share = tier.share;
       rule = `${Math.round(tier.share * 1000) / 10}% all-in`;
       allIn = round2(price * tier.share);
-      hammer = Math.floor(allIn / (1 + buyersPremium()));
+      hammer = whole(allIn / (1 + buyersPremium()));
       break;
   }
 
   if (hammer < 1) return null;
-  return { rule, share, allIn, hammer };
+  // A hammer rounded up costs a little more than the rule's all-in, and the
+  // budget is charged what the lot would really cost, not what the rule said.
+  if (round === "up" && tier.kind !== "flat") allIn = round2(hammer * (1 + buyersPremium()));
+  return { rule: round === "up" ? `${rule}, rounded up` : rule, share, allIn, hammer };
 }
 
-/** The most to pay for a lot whose card is worth `price`, under the table in force. */
+/**
+ * The most to pay for a lot whose card is worth `price`, under the table in
+ * force — the band's rule worked on the price it is handed.
+ *
+ * This is the short way in, for a caller that has already settled on one
+ * price: the backtest, and any table whose bands all price the run's way. A
+ * band that prices its own way needs the card's sales rather than one number,
+ * and quoteBand() is the way in for that.
+ */
 export function maxBid(
   grader: Grader,
   price: number,
   table: TierTable = tierTable(),
 ): { rule: string; share: number | null; allIn: number; hammer: number } | null {
-  const tier = tierFor(grader, price, table);
-  return tier ? applyRule(tier, price) : null;
+  const band = bandFor(grader, price, table);
+  return band ? applyRule(band.rule, price, band.round ?? "down") : null;
+}
+
+/**
+ * Everything the bid maths knows about a card: its sales, and the estimate
+ * behind them.
+ *
+ * `omit` is the backtest's: a sold lot's own sale counts toward whether the
+ * card had a history worth pricing from, and is kept out of the price itself,
+ * because the sniper was working hours before that sale happened.
+ */
+export type PriceEvidence = { sales: Sale[]; altValue: number | null; now: Date; omit?: (sale: Sale) => boolean };
+
+/** The prices a rule works on, with anything the caller asked to leave out left out. */
+function pricesFrom(ev: PriceEvidence, used: Sale[]): number[] {
+  return (ev.omit ? used.filter((sale) => !ev.omit!(sale)) : used).map((sale) => sale.price);
+}
+
+/**
+ * The widest net this grader's table casts: as many sales as any band looks
+ * at, as far back as any band goes, and as few as the least demanding band
+ * will settle for.
+ *
+ * It is what picks the band. A band cannot pick itself — its own price is
+ * what the picking is for — so the card is measured once, on everything the
+ * table might accept, and the band that price falls in then prices it its own
+ * way. When every band prices the run's way this is simply the run's rule,
+ * which is why a table written before any of this still bids the same.
+ */
+export function selectionRule(tiers: GraderTiers, run: SalesRule = salesRule()): SalesRule {
+  if (tiers.bands.length === 0) return run;
+  let count = 0;
+  let windowDays = 0;
+  let need = Infinity;
+  for (const band of tiers.bands) {
+    const { rule } = resolveRecipe(band.pricing, run);
+    count = Math.max(count, rule.count);
+    windowDays = Math.max(windowDays, rule.windowDays);
+    need = Math.min(need, rule.need);
+  }
+  return { count, windowDays, need: Math.min(need, count) };
+}
+
+/**
+ * What the card is worth, for the one purpose of picking its band: the run's
+ * basis worked on the widest net the table casts.
+ *
+ * With too few sales for even that, the alt value stands in — not to bid on,
+ * but so a band with a fallback still gets its turn. Only when there is
+ * neither is the lot done with here.
+ */
+export function bandBasis(grader: Grader, ev: PriceEvidence, table: TierTable = tierTable()):
+  | { price: number; median: number | null; via: string }
+  | { price: null; median: number | null; reason: string } {
+  const rule = selectionRule(table[grader]);
+  const gate = salesGate(ev.sales, ev.now, rule);
+  const used = pricesFrom(ev, salesIn(ev.sales, rule, ev.now));
+  const median = used.length === 0 ? null : applyBasis({ kind: "median" }, used);
+  if (gate.ok) {
+    const price = applyBasis(basisRule(), used);
+    if (price !== null) return { price, median, via: `${formatBasis()} of ${used.length} sale(s) inside ${rule.windowDays}d` };
+  }
+  if (ev.altValue !== null && ev.altValue > 0) return { price: ev.altValue, median, via: "alt value" };
+  return { price: null, median, reason: gate.reason ?? "no priced sales" };
+}
+
+/** What a band bid, and the price it bid on. */
+export type Quoted = { price: number; via: string; rule: string; share: number | null; allIn: number; hammer: number };
+
+/**
+ * The bid for a lot whose band has been picked: the band's own recipe worked
+ * on the card's sales, then the band's rule worked on that.
+ *
+ * A band whose sales are not there falls back if it was given one and is
+ * refused if it was not — a refusal is the safe answer, since a bid priced
+ * off evidence the band said it needed and did not get is a bid at a made-up
+ * number.
+ */
+export function quoteBand(grader: Grader, price: number, ev: PriceEvidence, table: TierTable = tierTable()):
+  { ok: true; quote: Quoted } | { ok: false; reason: string } {
+  const band = bandFor(grader, price, table);
+  if (!band) {
+    return {
+      ok: false,
+      reason: price < tierFloor(grader, table)
+        ? `market price $${price} is under the $${tierFloor(grader, table)} ${grader} floor`
+        : `market price $${price} is above the $${tierCeiling(grader, table)} ${grader} tier ceiling`,
+    };
+  }
+  const label = bandLabel(grader, band, table);
+  const alt = ev.altValue !== null && ev.altValue > 0 ? ev.altValue : null;
+  let rule = band.rule;
+  let worked: number;
+  let via: string;
+
+  if (band.pricing?.altValue) {
+    if (alt === null) return { ok: false, reason: `the ${label} band prices off the alt value and this cert has none` };
+    worked = alt;
+    via = "alt value";
+  } else {
+    const { basis, rule: sales } = resolveRecipe(band.pricing);
+    const window = salesIn(ev.sales, sales, ev.now);
+    const used = pricesFrom(ev, window);
+    if (window.length < sales.need || used.length === 0) {
+      const short = `only ${window.length} sale(s) inside ${sales.windowDays}d, the ${label} band needs ${sales.need}`;
+      if (!band.fallback || band.fallback.kind === "none") return { ok: false, reason: short };
+      if (alt === null) return { ok: false, reason: `${short}, and no alt value to fall back on` };
+      worked = alt;
+      rule = { kind: "share", share: band.fallback.share };
+      via = `alt value — ${short}`;
+    } else {
+      const found = applyBasis(basis, used);
+      if (found === null) return { ok: false, reason: `no priced sales inside ${sales.windowDays}d` };
+      worked = found;
+      via = `${formatBasis(basis)} of ${used.length} sale(s) inside ${sales.windowDays}d`;
+    }
+  }
+
+  const bid = applyRule(rule, worked, band.round ?? "down");
+  if (!bid) return { ok: false, reason: `the ${label} band's ${ruleText(rule)} of $${worked} comes to less than a dollar` };
+  return { ok: true, quote: { price: worked, via, ...bid } };
 }
 
 /**
@@ -1075,6 +1663,12 @@ export type SelectionCounts = {
   noCert: number;
   blockList: number;
   blockListDetail: string;
+  /** CGC slabs carrying no number grade — Authentic, or a title that never says. */
+  ungraded: number;
+  /** Slabs whose title carries no card number: not a numbered Pokémon card. */
+  noNumber: number;
+  /** Slabs outside the run's grade range for their grader. */
+  offGrade: number;
   masterBallOrDuplicate: number;
 };
 
@@ -1091,43 +1685,47 @@ export type SelectionCounts = {
  *
  * With `chaseList: false` (Alt) every PSA/CGC lot is a candidate whatever its
  * title says; the keywords are still read, for the record, and the Master
- * Ball gate and the block list still apply.
+ * Ball gate and the block list still apply. It may also be set per grader —
+ * Fanatics prices every PSA lot and only the chase list's CGC ones — since
+ * what the list is for is keeping the credits off twelve thousand bulk lots,
+ * and the two graders do not carry the same bulk.
  */
 export function selectCandidates(
   lots: ScannedLot[],
   log: (line: string) => void,
-  opts: { chaseList?: boolean } = {},
+  opts: { chaseList?: boolean | Partial<Record<Grader, boolean>> } = {},
 ): {
   candidates: Candidate[];
   rejected: { candidate: Candidate; reason: string }[];
   counts: SelectionCounts;
 } {
-  const chaseList = opts.chaseList ?? true;
-  const dropped = { noCert: 0, noMatch: 0 };
+  const asked = opts.chaseList ?? true;
+  const chasing = chasedGraders(asked);
+  const chases = (grader: Grader) => chasing.includes(grader);
+  const chaseList = chasing.length > 0;
+  const dropped = { noCert: 0, noMatch: 0, ungraded: 0, noNumber: 0, offGrade: 0 };
   const blocked = new Map<string, number>();
   const seen = new Set<string>();
   const candidates: Candidate[] = [];
   const rejected: { candidate: Candidate; reason: string }[] = [];
 
   // The order the --max-cards cut is taken in, so it decides where the credits
-  // go: the card priority order first, then soonest auction, then cheapest
-  // current bid. Grade leading is also what the sales gate wants — a 10 of a
-  // modern card sells five times a month, a CGC 7 of the same card sells twice
-  // a year, and a test run that took the cheapest lots first priced five CGC
-  // 7s and passed none. Auction order inside that means a duplicate cert (the
-  // same slab relisted) keeps its earliest-closing listing.
+  // go: the full arts first, then the cheapest, then the soonest to close.
+  // Auction order last means a duplicate cert (the same slab relisted) keeps
+  // its earliest-closing listing, and the grade after it breaks what is left.
   const graded = (l: ScannedLot): Graded => ({ grade: l.grade, gradingService: l.grader, title: l.title, pristine: l.pristine });
   const ordered = [...lots].sort((a, b) =>
     priorityRank(graded(a)) - priorityRank(graded(b)) ||
+    a.currentBid - b.currentBid ||
     (a.closesAtUnixS ?? 0) - (b.closesAtUnixS ?? 0) ||
-    a.currentBid - b.currentBid);
+    (b.grade ?? 0) - (a.grade ?? 0));
 
   for (const lot of ordered) {
     const grader = lot.grader as Grader;
     if (!GRADERS.includes(grader)) continue;
 
     let keywords = matchKeywords(lot.title);
-    if (chaseList && keywords.length === 0) { dropped.noMatch++; continue; }
+    if (chases(grader) && keywords.length === 0) { dropped.noMatch++; continue; }
     // After the chase list, not before: a house that has to be asked for each
     // cert is only asked about the lots worth asking about.
     const cert = lot.cert.trim();
@@ -1135,10 +1733,26 @@ export function selectCandidates(
 
     const candidate: Candidate = { ...lot, grader, cert, keywords };
 
-    const block = blockedBy(lot.title);
+    const block = blockedBy(lot.title, grader);
     if (block) {
       blocked.set(block, (blocked.get(block) ?? 0) + 1);
       rejected.push({ candidate, reason: `block list: ${block}` });
+      continue;
+    }
+    // A slab with no number on it has no tier band and no comps worth the
+    // name, whatever else the title says.
+    if (grader === "CGC") {
+      const ungraded = cgcUngraded(graded(lot));
+      if (ungraded) { dropped.ungraded++; rejected.push({ candidate, reason: ungraded }); continue; }
+    }
+    if (!hasCardNumber(lot.title)) {
+      dropped.noNumber++;
+      rejected.push({ candidate, reason: "no card number in the title — not a numbered Pokémon card" });
+      continue;
+    }
+    if (!gradeAllowed(grader, lot.grade, gradeRanges())) {
+      dropped.offGrade++;
+      rejected.push({ candidate, reason: `${grader} ${lot.grade ?? "?"} is outside ${formatGradeRange(gradeRanges()[grader])}` });
       continue;
     }
     if (keywords.includes("Master Ball") && !masterBallAllowed(graded(lot))) {
@@ -1161,11 +1775,12 @@ export function selectCandidates(
   const blockedTotal = [...blocked.values()].reduce((a, b) => a + b, 0);
   const byCount = [...blocked].sort((a, b) => b[1] - a[1]);
   log(chaseList
-    ? `    dropped: ${dropped.noMatch} off the chase list, ${dropped.noCert} without a cert`
+    ? `    dropped: ${dropped.noMatch} off the chase list (${chasing.join(" and ")} only), ${dropped.noCert} without a cert`
     : `    dropped: ${dropped.noCert} without a cert (no chase list here: every PSA/CGC lot is a candidate)`);
   log(`    rejected: ${blockedTotal} on the block list` +
     (blockedTotal > 0 ? ` (${byCount.map(([p, n]) => `${n} ${p}`).join(", ")})` : "") +
-    `, ${rejected.length - blockedTotal} Master Ball below grade / duplicate cert`);
+    `, ${dropped.ungraded} CGC slabs with no number grade, ${dropped.noNumber} with no card number, ${dropped.offGrade} outside the grade range` +
+    `, ${rejected.length - blockedTotal - dropped.ungraded - dropped.noNumber - dropped.offGrade} Master Ball below grade / duplicate cert`);
   // The funnel wants the same thing readable rather than complete: the handful
   // of patterns that did the work, as words rather than regex source.
   const blockListDetail = byCount.slice(0, 5).map(([p]) => prettyPattern(p)).join(", ")
@@ -1178,7 +1793,10 @@ export function selectCandidates(
       noCert: dropped.noCert,
       blockList: blockedTotal,
       blockListDetail,
-      masterBallOrDuplicate: rejected.length - blockedTotal,
+      ungraded: dropped.ungraded,
+      noNumber: dropped.noNumber,
+      offGrade: dropped.offGrade,
+      masterBallOrDuplicate: rejected.length - blockedTotal - dropped.ungraded - dropped.noNumber - dropped.offGrade,
     },
   };
 }
@@ -1724,6 +2342,8 @@ export type Row = {
   market_price: number | "";
   /** The median of the same sales: what the card goes for. */
   sales_median: number | "";
+  /** How market_price was arrived at — the band's own basis and window, or the alt value it fell back on. */
+  priced_by?: string;
   tier_rule: string;
   max_bid_hammer: number | "";
   max_bid_all_in: number | "";
@@ -1757,7 +2377,7 @@ export type Row = {
 /** The columns of the bid list CSV, in order. */
 export const CSV_COLUMNS: (keyof Row)[] = [
   "url", "title", "auction", "lot", "language", "grader", "grade", "cert",
-  "market_price", "sales_median", "tier_rule", "max_bid_hammer", "max_bid_all_in",
+  "market_price", "sales_median", "priced_by", "tier_rule", "max_bid_hammer", "max_bid_all_in",
   "bid_placed", "bid_status", "final_bid", "final_paid_all_in", "market_pct",
   "unawardable",
 ];
@@ -1772,7 +2392,7 @@ export function baseRow(c: Candidate): Row {
     grader: c.grader,
     grade: c.grade !== undefined ? String(c.grade) : "",
     cert: c.cert,
-    market_price: "", sales_median: "", tier_rule: "", max_bid_hammer: "", max_bid_all_in: "",
+    market_price: "", sales_median: "", priced_by: "", tier_rule: "", max_bid_hammer: "", max_bid_all_in: "",
     bid_placed: "", bid_status: "", final_bid: "", final_paid_all_in: "", market_pct: "", unawardable: "",
     listing_id: c.listingId,
     priority: priorityRank({ grade: c.grade, gradingService: c.grader, title: c.title, pristine: c.pristine }),
@@ -1832,30 +2452,39 @@ export function evaluate(c: Candidate, price: CuPrice | undefined, now: Date): {
   if (price.error) { row.reason = price.error; return { row, worthy: false }; }
   if (!price.card && !price.info) { row.reason = "cert did not resolve"; return { row, worthy: false }; }
 
-  const gate = salesGate(price.sales, now);
-  if (!gate.ok) { row.reason = gate.reason ?? "sales gate"; return { row, worthy: false }; }
+  const evidence: PriceEvidence = { sales: price.sales, altValue: price.altValue, now };
 
-  const market = marketPrice(price.sales);
-  if (market.price === null) { row.reason = "no priced sales"; return { row, worthy: false }; }
-  row.market_price = market.price;
-  row.sales_median = salesMedian(price.sales) ?? "";
+  // What the card is worth, for picking the band. The band it lands in then
+  // prices it again its own way, which is what the bid is worked from.
+  const basis = bandBasis(c.grader, evidence);
+  row.sales_median = basis.median ?? "";
+  if (basis.price === null) { row.reason = basis.reason; return { row, worthy: false }; }
+  row.market_price = basis.price;
 
   // The sourcing check comes before the table: a card no pack can award is
   // not bought at any price, whatever table this run was given.
-  const unawardable = unawardableLotReason({ medianDollars: row.sales_median === "" ? null : row.sales_median, basisDollars: market.price });
+  const unawardable = unawardableLotReason({ medianDollars: basis.median, basisDollars: basis.price });
   if (unawardable) {
     row.unawardable = unawardable;
     row.reason = `unawardable: ${unawardable}`;
     return { row, worthy: false };
   }
 
-  const bid = maxBid(c.grader, market.price);
-  if (!bid) {
-    row.reason = market.price < tierFloor(c.grader)
-      ? `market price $${market.price} is under the $${tierFloor(c.grader)} ${c.grader} floor`
-      : `market price $${market.price} is above the $${tierCeiling(c.grader)} ${c.grader} tier ceiling`;
+  const quoted = quoteBand(c.grader, basis.price, evidence);
+  if (!quoted.ok) { row.reason = quoted.reason; return { row, worthy: false }; }
+  const bid = quoted.quote;
+  row.market_price = bid.price;
+  row.priced_by = bid.via;
+
+  // The band's own price can land somewhere the first one did not, so the
+  // ladder is asked about the figure the bid is actually made of.
+  const stillUnawardable = unawardableLotReason({ medianDollars: basis.median, basisDollars: bid.price });
+  if (stillUnawardable) {
+    row.unawardable = stillUnawardable;
+    row.reason = `unawardable: ${stillUnawardable}`;
     return { row, worthy: false };
   }
+
   row.tier_rule = bid.rule;
   row.max_bid_all_in = bid.allIn;
   row.max_bid_hammer = bid.hammer;
@@ -1961,7 +2590,7 @@ function summaryMarkdown(
   const lines = [
     `## ${opts.venue} sniper — ${opts.mode}`,
     ``,
-    `- ${scanned} live PSA/CGC 7–10 Pokémon lots scanned, ${candidates} ${opts.chaseList ? "on the chase list" : "candidate(s) — every lot is, here"}, ${worthy.length} worth a bid, ${rejected.length} rejected`,
+    `- ${scanned} live PSA/CGC Pokémon lots scanned, ${candidates} ${opts.chaseList ? "on the chase list" : "candidate(s) — every lot is, here"}, ${worthy.length} worth a bid, ${rejected.length} rejected`,
     // What every max bid on this page was worked out from, so a page read
     // weeks later says which basis it was bid on.
     `- priced off the ${formatBasis()} of ${formatSalesRule()}; the tier tables' shares multiply that`,
@@ -2051,12 +2680,20 @@ export function toBiddable(row: Row): Biddable | null {
     currentBidCents: Math.round(Number(row.current_bid) * 100),
     bidCount: Number(row.bid_count) || 0,
     cardKey: row.card_key || undefined,
+    grader: row.grader || undefined,
   };
 }
 
-/** The per-card cap the book bids under, as this run was told to set it. */
+let activeGraderCopyCaps: Record<string, number> = {};
+
+/** Cap this grader's copies of a card from now on — what --max-copies-cgc does. */
+export function setGraderCopyCaps(caps: Record<string, number>): void {
+  activeGraderCopyCaps = caps;
+}
+
+/** The per-card caps the book bids under, as this run was told to set them. */
 export function cardCaps(): CardCaps {
-  return { perCard: maxCopiesPerCard() };
+  return { perCard: maxCopiesPerCard(), perCardByGrader: activeGraderCopyCaps };
 }
 
 /**
@@ -2131,11 +2768,14 @@ export interface Venue {
   /** How the site takes a bid. */
   steps: BidSteps;
   /**
-   * Whether a lot's title has to match the chase list to be priced. Fanatics:
-   * yes — a Weekly Auction is twelve thousand Pokémon lots, most of them
-   * bulk. Alt: no — every PSA/CGC Pokémon lot in the cycle is a candidate.
+   * Whether a lot's title has to match the chase list to be priced, and it
+   * may be answered per grader. Fanatics: CGC only — a Weekly Auction is
+   * twelve thousand Pokémon lots and the CGC end of it is $6 energies,
+   * insert cards and sticker sheets, while its PSA lots are worth pricing
+   * whatever the title says. Alt: no — every PSA/CGC Pokémon lot in the
+   * cycle is a candidate.
    */
-  chaseList: boolean;
+  chaseList: boolean | Partial<Record<Grader, boolean>>;
   /**
    * Whether the whole auction extends and ends together (Alt: any bid anywhere
    * pushes every lot's close out, and one quiet window closes all of it) or
@@ -2152,7 +2792,8 @@ export interface Venue {
   /** The lot's page, so a log line can be clicked through to what was bid on. */
   listingUrl(listingId: string): string;
   /**
-   * Every live PSA/CGC 7–10 Pokémon lot in the auction about to close, and when
+   * Every live PSA/CGC Pokémon lot in the auction about to close, at the
+   * grades the run scans, and when
    * that auction's extended bidding is scheduled to start. A `light` scan is
    * the same read for nothing but where each lot's bidding stands — no certs,
    * no chatter — and is taken every few minutes before the fire.
@@ -2210,13 +2851,17 @@ export async function runSniper(venue: Venue): Promise<void> {
   if (!Number.isInteger(batchSize) || batchSize < 1) throw new Error(`--batch must be a positive whole number, got "${opt("batch", "")}"`);
   const pollS = Number(opt("poll", String(DEFAULT_POLL_S)));
   if (!(pollS >= MIN_POLL_S)) throw new Error(`--poll must be at least ${MIN_POLL_S} seconds, got "${opt("poll", "")}"`);
-  const budgetDollars = Number(opt("budget", String(DEFAULT_BUDGET_DOLLARS)));
-  if (!(budgetDollars > 0)) throw new Error(`--budget must be a positive number of dollars, got "${opt("budget", "")}"`);
-  const budgetCents = Math.round(budgetDollars * 100);
+  const budgetBox = parsePerGrader(opt("budget", String(DEFAULT_BUDGET_DOLLARS)), "--budget");
+  if (!(budgetBox.all > 0)) throw new Error(`--budget must be a positive number of dollars, got "${opt("budget", "")}"`);
+  const budgetCents = Math.round(budgetBox.all * 100);
+  const perGraderCents: Record<string, number> = {};
+  for (const [grader, dollars] of Object.entries(budgetBox.byGrader)) perGraderCents[grader] = Math.round(dollars * 100);
+  Object.assign(perGraderCents, graderBudgetsFromArgs());
   // Read before anything is scanned: a table or a cap that cannot be read is
   // a run that should not start.
   setTierTable(tiersFromArgs());
   setMaxCopiesPerCard(maxCopiesFromArgs());
+  setGraderCopyCaps(graderCopyCapsFromArgs());
   setSalesRule(salesRuleFromArgs());
   setBasis(basisFromArgs());
   const fireAfterMin = fireAfterFromArgs(venue.fireAfterMinutes);
@@ -2241,10 +2886,16 @@ export async function runSniper(venue: Venue): Promise<void> {
   console.log(`    fire         ${fireAfterMin} min after extended bidding opens${venue.closesTogether ? ", or the moment the auction reads seconds from its end" : ""}${live ? "" : " — for a live run; this one sends nothing"}`);
   console.log(`    max cards    ${maxCards > 0 ? maxCards : "every candidate"}`);
   console.log(`    batch        ${batchSize} cert(s) priced per round, ${concurrency} at a time; every candidate is priced`);
-  for (const grader of GRADERS) console.log(`    tiers ${grader}    ${formatTiers(tierTable()[grader])}`);
+  for (const grader of GRADERS) {
+    const purse = perGraderCents[grader];
+    console.log(`    tiers ${grader}    ${formatTiers(tierTable()[grader])}${purse === undefined ? "" : ` — at most ${dollars(purse)} of the ceiling`}`);
+  }
   const noTable = nothingToBidOn();
   if (noTable) console.log(`    ${noTable}`);
-  console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader`);
+  const graderCaps = Object.entries(cardCaps().perCardByGrader ?? {});
+  console.log(`    grades       ${GRADERS.map((g) => `${g} ${formatGradeRange(gradeRanges()[g])}`).join(", ")}`);
+  console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` +
+    (graderCaps.length > 0 ? `, and at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} of it` : ""));
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
   console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);
   if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
@@ -2256,7 +2907,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   const scanned = await venue.scan({ headed, now });
   const lots = scanned.lots;
   const closesAt = scanned.closesAtUnixS;
-  console.log(`    ${lots.length} live PSA/CGC 7–10 Pokémon lot(s)`);
+  console.log(`    ${lots.length} live PSA/CGC Pokémon lot(s)`);
   if (Number.isFinite(closesAt)) {
     console.log(`    ${untilClose(closesAt)}  (${fmtLocal(closesAt, venue.timeZone, venue.zoneLabel)})`);
     console.log(`    the bids go on at ${fmtLocal(fireAtUnixS(closesAt, fireAfterMin), venue.timeZone, venue.zoneLabel)}${live ? "" : " — in a live run"}`);
@@ -2276,7 +2927,8 @@ export async function runSniper(venue: Venue): Promise<void> {
     beyondMaxCards = candidates.length - maxCards;
     candidates = candidates.slice(0, maxCards);
   }
-  console.log(`    ${candidates.length} candidate(s)${venue.chaseList ? " on the chase list" : ""}`);
+  const chasing = chasedGraders(venue.chaseList);
+  console.log(`    ${candidates.length} candidate(s)${chasing.length > 0 ? ` (${chasing.join(" and ")} on the chase list)` : ""}`);
   console.log();
 
   // 3. The sessions the run needs: Card Uploader for pricing and identity, the
@@ -2307,7 +2959,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       console.log();
     }
 
-    const book = new BidBook(session, { budgetCents, live, log, steps: venue.steps, listingUrl: venue.listingUrl, caps: cardCaps(), countInherited: countExistingBids });
+    const book = new BidBook(session, { budgetCents, perGraderCents, live, log, steps: venue.steps, listingUrl: venue.listingUrl, caps: cardCaps(), countInherited: countExistingBids });
     if (session) await book.seed();
     log("start", { mode, budgetCents, countExistingBids, fireAfterMin, chaseList: candidates.length });
     /** Lots a re-scan found already past the max, and why — kept out of the fire and said so in the CSV. */
@@ -2433,7 +3085,7 @@ export async function runSniper(venue: Venue): Promise<void> {
 
       // Card priority order first — PSA 10 down to 7, then CGC Pristine, Gem
       // Mint, 9.5 down to 7 — and the most headroom inside it.
-      passed.sort((a, b) => a.priority - b.priority || Number(b.headroom) - Number(a.headroom));
+      passed.sort((a, b) => a.priority - b.priority || Number(a.max_bid_all_in) - Number(b.max_bid_all_in));
       const cut = finalCut(passed);
       rejected.push(...cut.dropped);
       flaggedOut += cut.flaggedOut;
@@ -2448,7 +3100,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       // best of what is known rather than the first thing found. A plan bids
       // (on paper) as it goes; a live run holds everything for the fire, and
       // only a round priced after it hands its lots to the watch below.
-      bidding.sort((a, b) => a.priority - b.priority || Number(b.headroom) - Number(a.headroom));
+      bidding.sort((a, b) => a.priority - b.priority || Number(a.max_bid_all_in) - Number(b.max_bid_all_in));
       if (!live || fired) {
         const filled = await book.fill(pool());
         if (filled.auctionClosed) auctionClosed = true;
@@ -2570,7 +3222,7 @@ export async function runSniper(venue: Venue): Promise<void> {
      * had found past the max, for the funnel.
      */
     const writeOutputs = (final: boolean): number => {
-      worthy.sort((a, b) => a.priority - b.priority || Number(b.headroom) - Number(a.headroom));
+      worthy.sort((a, b) => a.priority - b.priority || Number(a.max_bid_all_in) - Number(b.max_bid_all_in));
       const placedBy = new Map(book.placed.map((b) => [b.listingId, b]));
       const inheritedBy = new Map(book.inherited.map((b) => [b.listingId, b]));
       const skippedBy = new Map(book.skipped.map((s) => [s.listingId, s]));
@@ -2612,7 +3264,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       // The one file worth keeping, and the page the Actions summary shows.
       writeFileSync(join(outDir, csvName), toCsv(worthy));
       writeFileSync(join(outDir, "summary.md"), summaryMarkdown(worthy, rejected, onChaseList, lots.length,
-        { venue: venue.name, csv: csvName, mode: held ? `${mode} — holding for the fire` : mode, standing: book.standing(), chaseList: venue.chaseList, held }));
+        { venue: venue.name, csv: csvName, mode: held ? `${mode} — holding for the fire` : mode, standing: book.standing(), chaseList: chasing.length > 0, held }));
       if (!final) log("written", { held: queue, out: pricedOutCount });
       return pricedOutCount;
     };
@@ -2808,7 +3460,7 @@ export async function runSniper(venue: Venue): Promise<void> {
     const walked = candidates.slice(0, cursor);
     const neverAnswered = walked.filter((c) => prices.get(`${c.grader}:${c.cert}`)?.error).length;
     const pricedOk = walked.length - neverAnswered;
-    const lines: FunnelLine[] = [{ kind: "total", n: lots.length, label: "live PSA/CGC 7–10 Pokémon lots" }];
+    const lines: FunnelLine[] = [{ kind: "total", n: lots.length, label: "live PSA/CGC Pokémon lots" }];
     const cut = (n: number, label: string) => { if (n > 0) lines.push({ kind: "cut", n, label }); };
 
     cut(selected.counts.offChaseList, "off the chase list");
@@ -2816,7 +3468,7 @@ export async function runSniper(venue: Venue): Promise<void> {
     cut(selected.counts.blockList, `block list${selected.counts.blockListDetail ? ` (${selected.counts.blockListDetail})` : ""}`);
     cut(selected.counts.masterBallOrDuplicate, "Master Ball below grade / duplicate cert");
     cut(beyondMaxCards, `beyond --max-cards=${maxCards}`);
-    lines.push({ kind: "rule" }, { kind: "total", n: candidates.length, label: venue.chaseList ? "on the chase list" : "candidates (every PSA/CGC lot)" });
+    lines.push({ kind: "rule" }, { kind: "total", n: candidates.length, label: chasing.length > 0 ? `candidates (${chasing.join(" and ")} on the chase list)` : "candidates (every PSA/CGC lot)" });
 
     cut(candidates.length - cursor, "never reached — the auction closed first");
     lines.push({ kind: "rule" }, { kind: "total", n: cursor, label: "priced (free)" });

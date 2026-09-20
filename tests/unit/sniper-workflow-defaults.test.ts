@@ -8,6 +8,8 @@ import {
   parseBasis,
   parseSalesRule,
   DEFAULT_TIERS,
+  formatTiers,
+  parseGradeRange,
   parseTiers,
 } from "@/scripts/sniper-core";
 import { DEFAULT_BUDGET_DOLLARS } from "@/scripts/sniper-book";
@@ -15,22 +17,44 @@ import { fanatics } from "@/scripts/fanatics-sniper";
 import { alt } from "@/scripts/alt-sniper";
 
 /**
- * The workflow boxes' tier defaults are documented as "the code's own
- * (DEFAULT_TIERS)". Each one has to read back to exactly that table.
+ * The three forms share one tier grammar, and a table that cannot be read is
+ * a run that dies after the dispatch with the auction already closing. So
+ * every box's default has to read — and the backtest's has to be the very
+ * line the snipers bid, or it is measuring something else.
  */
 const WORKFLOWS = ["fanatics-sniper.yml", "alt-sniper.yml", "sold-report.yml"];
 
+const tierDefault = (name: string, input: string) => {
+  const text = readFileSync(join(__dirname, "..", "..", ".github", "workflows", name), "utf8");
+  const m = new RegExp(`\\n\\s*${input}:[\\s\\S]*?\\n\\s*default:\\s*"([^"]+)"`).exec(text);
+  expect(m, `${name} has a ${input} default`).not.toBeNull();
+  return m![1];
+};
+
 describe("sniper workflow tier defaults", () => {
   for (const name of WORKFLOWS) {
-    test(`${name}: psa_tiers / cgc_tiers defaults parse to DEFAULT_TIERS`, () => {
-      const text = readFileSync(join(__dirname, "..", "..", ".github", "workflows", name), "utf8");
-      for (const [input, grader] of [["psa_tiers", "PSA"], ["cgc_tiers", "CGC"]] as const) {
-        const m = new RegExp(`\\n\\s*${input}:[\\s\\S]*?\\n\\s*default:\\s*"([^"]+)"`).exec(text);
-        expect(m, `${name} has a ${input} default`).not.toBeNull();
-        expect(parseTiers(m![1])).toEqual(DEFAULT_TIERS[grader]);
+    test(`${name}: psa_tiers / cgc_tiers defaults read, and read back the way they print`, () => {
+      for (const input of ["psa_tiers", "cgc_tiers"]) {
+        const text = tierDefault(name, input);
+        const grades = /^grades?\s+([^,;]+)\s*[,;]\s*([\s\S]+)$/i.exec(text);
+        expect(() => parseGradeRange(grades![1]), text).not.toThrow();
+        const table = parseTiers(grades![2]);
+        expect(table.bands.length, text).toBeGreaterThan(0);
+        expect(parseTiers(formatTiers(table))).toEqual(table);
       }
     });
   }
+
+  test("the backtest judges lots under the very table the snipers bid", () => {
+    for (const input of ["psa_tiers", "cgc_tiers"]) {
+      expect(tierDefault("sold-report.yml", input)).toBe(tierDefault("fanatics-sniper.yml", input));
+      expect(tierDefault("alt-sniper.yml", input)).toBe(tierDefault("fanatics-sniper.yml", input));
+    }
+  });
+
+  test("DEFAULT_TIERS is still the fitted table a run falls back to nothing from", () => {
+    expect(formatTiers(DEFAULT_TIERS.PSA)).toBe("$7.5-8: flat $5, $8-10: market - $3, $10-90: 85%, $90-450: 80%");
+  });
 });
 
 /**

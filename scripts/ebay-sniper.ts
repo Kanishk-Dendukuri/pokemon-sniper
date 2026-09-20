@@ -156,6 +156,7 @@ import {
   sleep,
   snapshotFailure,
   tierTable,
+  gradeRanges,
   tiersFromArgs,
   toBiddable,
   type Candidate,
@@ -165,7 +166,16 @@ import {
   type Grader,
   type Row,
   type ScannedLot,
+  formatGradeRange,
+  gradeAllowed,
+  gradeRangesFrom,
+  parseGradeRange,
+  type GradeRange,
 } from "./sniper-core";
+
+// The grade grammar is shared with the auction-house snipers; eBay's callers
+// have always read it from here, so it still comes out of here.
+export { formatGradeRange, gradeAllowed, parseGradeRange, type GradeRange };
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -239,40 +249,21 @@ export const BATCH_PREFIX = "EbaySniper";
 
 // ── Grades ────────────────────────────────────────────────────────────────────
 
-export type GradeRange = { min: number; max: number };
-
-/** PSA 1–10, CGC 7–10: what was asked for on 2026-09-17. */
+/**
+ * PSA 1–10, CGC 7–10: what was asked for on 2026-09-17. eBay keeps a floor
+ * under CGC where the auction houses no longer do — it is an open market, and
+ * a CGC 4 on eBay is as often a trimmed card as a cheap one.
+ *
+ * The grammar and the check live in ./sniper-core, which the other two
+ * snipers read them from as well.
+ */
 export const DEFAULT_GRADE_RANGES: Record<Grader, GradeRange> = {
   PSA: { min: 1, max: 10 },
   CGC: { min: 7, max: 10 },
 };
 
-/** "1-10", "7–10", "7 to 10", or a single "10". */
-export function parseGradeRange(text: string): GradeRange {
-  const t = text.trim().replace(/[–—]/g, "-");
-  const m = /^(\d{1,2}(?:\.5)?)\s*(?:-|to)\s*(\d{1,2}(?:\.5)?)$/.exec(t) ?? (/^\d{1,2}(?:\.5)?$/.test(t) ? [t, t, t] : null);
-  if (!m) throw new Error(`cannot read the grade range "${text}": want "1-10" or "7-10"`);
-  const min = Number(m[1]);
-  const max = Number(m[2]);
-  if (!(min >= 1 && max <= 10 && min <= max)) throw new Error(`"${text}": grades run 1 to 10, low to high`);
-  return { min, max };
-}
-
-export function formatGradeRange(r: GradeRange): string {
-  return r.min === r.max ? String(r.min) : `${r.min}–${r.max}`;
-}
-
 export function gradeRangesFromArgs(env: Record<string, string | undefined> = process.env): Record<Grader, GradeRange> {
-  return {
-    PSA: parseGradeRange(opt("psa-grades", env.PSA_GRADES ?? formatGradeRange(DEFAULT_GRADE_RANGES.PSA))),
-    CGC: parseGradeRange(opt("cgc-grades", env.CGC_GRADES ?? formatGradeRange(DEFAULT_GRADE_RANGES.CGC))),
-  };
-}
-
-export function gradeAllowed(grader: string, grade: number | undefined, ranges: Record<Grader, GradeRange>): boolean {
-  if (grade === undefined || !GRADERS.includes(grader as Grader)) return false;
-  const r = ranges[grader as Grader];
-  return grade >= r.min && grade <= r.max;
+  return gradeRangesFrom(DEFAULT_GRADE_RANGES, env);
 }
 
 export function sellersFromArgs(env: Record<string, string | undefined> = process.env): string[] {
@@ -739,8 +730,10 @@ export async function runEbaySniper(): Promise<void> {
   const armConcurrency = Number(opt("arm-concurrency", String(DEFAULT_ARM_CONCURRENCY)));
   if (!Number.isInteger(armConcurrency) || armConcurrency < 1) throw new Error(`--arm-concurrency must be a positive whole number`);
   const detailsPerScan = Number(opt("details-per-scan", String(DEFAULT_DETAILS_PER_SCAN)));
-  const grades = gradeRangesFromArgs();
-  setTierTable(tiersFromArgs());
+  // The tier boxes may carry "grades 7-10" at the head of a line, so the
+  // tables are read first and the ranges come out of them.
+  setTierTable(tiersFromArgs(process.env, DEFAULT_GRADE_RANGES));
+  const grades = gradeRanges();
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setSalesRule(salesRuleFromArgs());
   setBasis(basisFromArgs());

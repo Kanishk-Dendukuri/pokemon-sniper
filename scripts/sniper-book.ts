@@ -210,6 +210,8 @@ export type Biddable = {
   bidCount: number;
   /** Which card this is a copy of, for the per-card cap; two lots of one card share it. */
   cardKey?: string;
+  /** "PSA", "CGC" — which purse this lot is bid out of, where the run keeps one per grader. */
+  grader?: string;
   /**
    * What this lot charges to post, when the house bills it per lot rather
    * than folding it into a premium. Counted in the all-in and taken off the
@@ -219,11 +221,37 @@ export type Biddable = {
 };
 
 /**
+ * The keys a lot is counted under: the card, and the card at this grader
+ * where a grader has a cap of its own.
+ */
+function cardKeys(row: { cardKey?: string; grader?: string }): string[] {
+  if (!row.cardKey) return [];
+  return row.grader === undefined ? [row.cardKey] : [row.cardKey, `${row.grader}:${row.cardKey}`];
+}
+
+/** Whether either cap — the card's or this grader's — is already full. */
+function overCap(caps: CardCaps, byCard: Map<string, number>, row: { cardKey?: string; grader?: string }): boolean {
+  if (!row.cardKey) return false;
+  if ((byCard.get(row.cardKey) ?? 0) >= caps.perCard) return true;
+  const perGrader = row.grader === undefined ? undefined : caps.perCardByGrader?.[row.grader];
+  return perGrader !== undefined && (byCard.get(`${row.grader}:${row.cardKey}`) ?? 0) >= perGrader;
+}
+
+/**
  * The most lots of one card this run may be winning or have won at once —
  * grade and grader do not come into it. An outbid copy makes room for the
  * next; a won one keeps its place.
  */
-export type CardCaps = { perCard: number };
+export type CardCaps = {
+  perCard: number;
+  /**
+   * A cap of its own for one grader, counted over that grader's copies only:
+   * four CGC copies of a card and four PSA ones are eight lots, and both caps
+   * have to allow a lot before it is bid on. A grader left out of this is
+   * held to perCard alone.
+   */
+  perCardByGrader?: Record<string, number>;
+};
 
 /**
  * The one rule with real money behind it: the amount sent is never above the
@@ -295,6 +323,8 @@ export type PlacedBid = {
   currentBidCents?: number;
   /** The card this lot is a copy of, so the cap can count what is live per card. */
   cardKey?: string;
+  /** The grader whose purse this is charged to, where the run keeps one per grader. */
+  grader?: string;
 };
 
 /** One of this account's bids, as the site reports it in the account-wide read. */
@@ -441,11 +471,17 @@ function atRisk(p: Pick<PlacedBid, "status" | "closed">): boolean {
  * The next lot on the list that the free budget covers — at the amount that
  * would actually be bid, which the house's steps fix from the max alone.
  */
-export function nextAffordable(rows: Biddable[], decided: Set<string>, freeCents: number, steps: BidSteps): Biddable | null {
+export function nextAffordable(
+  rows: Biddable[],
+  decided: Set<string>,
+  freeCents: number | ((row: Biddable) => number),
+  steps: BidSteps,
+): Biddable | null {
+  const free = typeof freeCents === "function" ? freeCents : () => freeCents;
   for (const row of rows) {
     if (decided.has(row.listingId)) continue;
     const ours = steps.below(row.maxHammerCents);
-    if (ours > 0 && allInCents(ours) <= freeCents) return row;
+    if (ours > 0 && allInCents(ours) <= free(row)) return row;
   }
   return null;
 }
@@ -535,6 +571,14 @@ export class BidBook {
     private readonly exchange: Exchange | null,
     private readonly opts: {
       budgetCents: number; live: boolean; log: Log; steps: BidSteps;
+      /**
+       * A ceiling of its own for a grader, under the run's: "PSA" and "CGC"
+       * may each be given one, and a lot is held back once either its
+       * grader's purse or the run's is out. A grader left out of this spends
+       * the run's ceiling like any other. Meant for a run that wants most of
+       * its money in PSA slabs without having to bid two runs to do it.
+       */
+      perGraderCents?: Record<string, number>;
       listingUrl?: (listingId: string) => string;
       /** Without a cap, every copy of a card may be bid on. */
       caps?: CardCaps;
@@ -556,10 +600,29 @@ export class BidBook {
     return this.exchange?.listingUrl(listingId) ?? this.opts.listingUrl?.(listingId) ?? listingId;
   }
 
-  committed(): number {
+  committed(grader?: string): number {
+    // A grader's purse holds only this run's own bids: what the account was
+    // already carrying is not filed under a grader, so it is charged to the
+    // run's ceiling and to nobody's purse.
+    if (grader !== undefined) return committedCents(this.placed.filter((p) => p.grader === grader));
     return committedCents(this.placed) + (this.opts.countInherited ? committedCents(this.inherited) : 0);
   }
-  free(): number { return this.opts.budgetCents - this.committed(); }
+
+  /**
+   * What is left to spend — on this grader's lots, where it has a purse of
+   * its own. Whichever of the two ceilings is nearer is the one that binds.
+   */
+  free(grader?: string): number {
+    const whole = this.opts.budgetCents - this.committed();
+    const purse = grader === undefined ? undefined : this.opts.perGraderCents?.[grader];
+    return purse === undefined ? whole : Math.min(whole, purse - this.committed(grader));
+  }
+
+  /** The graders with a purse of their own, and what is left in each. */
+  purses(): { grader: string; ceilingCents: number; freeCents: number }[] {
+    return Object.entries(this.opts.perGraderCents ?? {})
+      .map(([grader, ceilingCents]) => ({ grader, ceilingCents, freeCents: this.free(grader) }));
+  }
 
   /**
    * The lots the per-card cap holds back right now: copies of a card that
@@ -576,11 +639,11 @@ export class BidBook {
     const byCard = new Map<string, number>();
     for (const p of this.placed) {
       if (!p.cardKey || p.status === "OUTBID" || (p.closed && p.status !== "HIGH_BID")) continue;
-      byCard.set(p.cardKey, (byCard.get(p.cardKey) ?? 0) + 1);
+      for (const key of cardKeys(p)) byCard.set(key, (byCard.get(key) ?? 0) + 1);
     }
     for (const row of pool) {
       if (!row.cardKey || this.settled.has(row.listingId)) continue;
-      if ((byCard.get(row.cardKey) ?? 0) >= caps.perCard) blocked.add(row.listingId);
+      if (overCap(caps, byCard, row)) blocked.add(row.listingId);
     }
     return blocked;
   }
@@ -590,7 +653,7 @@ export class BidBook {
 
   /** True once the free budget cannot reach anything left in the pool that the caps allow. */
   full(pool: Biddable[]): boolean {
-    return nextAffordable(pool, new Set([...this.settled, ...this.capped(pool)]), this.free(), this.opts.steps) === null;
+    return nextAffordable(pool, new Set([...this.settled, ...this.capped(pool)]), (row) => this.free(row.grader), this.opts.steps) === null;
   }
 
   /** Nothing open on the account: every bid is closed, outbid, or was never sent. */
@@ -681,7 +744,7 @@ export class BidBook {
     for (;;) {
       // The caps are counted again every time round: a bid placed a moment ago
       // is one more live copy of its card.
-      const row = nextAffordable(pool, new Set([...this.settled, ...stalled, ...this.capped(pool)]), this.free(), this.opts.steps);
+      const row = nextAffordable(pool, new Set([...this.settled, ...stalled, ...this.capped(pool)]), (r) => this.free(r.grader), this.opts.steps);
       if (!row) return { placed, auctionClosed: false };
       stalled.add(row.listingId);
 
@@ -726,19 +789,19 @@ export class BidBook {
       if ("skip" in amount) { this.pass(row, amount.skip); continue; }
       const cents = withinMax(amount.cents, row);
       const allIn = allInCents(cents);
-      if (allIn > this.free()) continue;  // the ladder moved under us; next round
+      if (allIn > this.free(row.grader)) continue;  // the ladder moved under us; next round
 
       if (!this.opts.live) {
         this.settled.add(row.listingId);
         placed++;
-        this.placed.push({ listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PLANNED", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey });
+        this.placed.push({ listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PLANNED", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey, grader: row.grader });
         this.opts.log("would-bid", { listingId: row.listingId, url: this.url(row.listingId), cents, allIn, currentBid: lot.currentBidCents },
           `    ○  would bid ${dollars(cents)} (${dollars(allIn)} all-in) on ${row.lot} — current ${dollars(lot.currentBidCents)}, ${lot.bidCount} bid(s) — ${row.title}\n       ${this.url(row.listingId)}`);
         continue;
       }
 
       // Live. The request is the one irreversible thing in this file.
-      const pending: PlacedBid = { listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PENDING", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey };
+      const pending: PlacedBid = { listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PENDING", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey, grader: row.grader };
       let result: BidResult;
       try {
         result = await this.exchange!.sendBid(row, cents);
@@ -843,25 +906,34 @@ export class BidBook {
     const byCard = new Map<string, number>();
     for (const p of this.placed) {
       if (!p.cardKey || p.status === "OUTBID" || (p.closed && p.status !== "HIGH_BID")) continue;
-      byCard.set(p.cardKey, (byCard.get(p.cardKey) ?? 0) + 1);
+      for (const key of cardKeys(p)) byCard.set(key, (byCard.get(key) ?? 0) + 1);
     }
     const picks: Biddable[] = [];
     let free = this.free();
+    // Each grader's purse is drawn down alongside the run's, so a PSA-heavy
+    // list stops taking PSA lots and goes on taking CGC ones.
+    const byGrader = new Map<string, number>();
+    const freeFor = (row: Biddable) => {
+      if (row.grader === undefined) return free;
+      const purse = this.opts.perGraderCents?.[row.grader];
+      return purse === undefined ? free : Math.min(free, purse - this.committed(row.grader) - (byGrader.get(row.grader) ?? 0));
+    };
     let exposureCents = 0;
     let beyond = 0;
     for (const row of pool) {
       if (this.settled.has(row.listingId)) continue;
       const ours = this.opts.steps.below(row.maxHammerCents);
       if (ours <= 0) continue;
-      if (row.cardKey && caps && (byCard.get(row.cardKey) ?? 0) >= caps.perCard) continue;
+      if (caps && overCap(caps, byCard, row)) continue;
       const allIn = allInCents(ours);
       // The ceiling: a lot it does not reach is skipped, and a cheaper one
       // further down may still fit, so this is a skip rather than a stop.
-      if (allIn > free) { beyond++; continue; }
+      if (allIn > freeFor(row)) { beyond++; continue; }
       picks.push(row);
       free -= allIn;
+      if (row.grader !== undefined) byGrader.set(row.grader, (byGrader.get(row.grader) ?? 0) + allIn);
       exposureCents += allIn;
-      if (row.cardKey) byCard.set(row.cardKey, (byCard.get(row.cardKey) ?? 0) + 1);
+      for (const key of cardKeys(row)) byCard.set(key, (byCard.get(key) ?? 0) + 1);
     }
     return { picks, exposureCents, beyond };
   }
@@ -916,14 +988,14 @@ export class BidBook {
       if (!this.opts.live) {
         this.settled.add(row.listingId);
         placed++;
-        this.placed.push({ listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PLANNED", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey });
+        this.placed.push({ listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PLANNED", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey, grader: row.grader });
         this.opts.log("would-bid", { listingId: row.listingId, url: this.url(row.listingId), cents, allIn, currentBid: lot.currentBidCents },
           `    ○  would bid ${dollars(cents)} (${dollars(allIn)} all-in) on ${row.lot} — current ${dollars(lot.currentBidCents)}, ${lot.bidCount} bid(s) — ${row.title}\n       ${this.url(row.listingId)}`);
         return;
       }
 
       // Live. The request is the one irreversible thing in this file.
-      const pending: PlacedBid = { listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PENDING", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey };
+      const pending: PlacedBid = { listingId: row.listingId, title: row.title, lot: row.lot, cents, allInCents: allIn, status: "PENDING", closed: false, at: new Date().toISOString(), currentBidCents: lot.currentBidCents, cardKey: row.cardKey, grader: row.grader };
       let result: BidResult;
       try {
         result = await this.exchange!.sendBid(row, cents);
@@ -1130,7 +1202,10 @@ export class BidBook {
     const outbid = this.placed.filter((p) => p.status === "OUTBID").length;
     const pending = this.placed.filter((p) => p.status === "PENDING").length;
     const planned = this.placed.filter((p) => p.status === "PLANNED").length;
-    const held = `committed ${dollars(this.committed())} of ${dollars(this.opts.budgetCents)}, ${dollars(this.free())} free`;
+    const purses = this.purses();
+    const perGrader = purses.length === 0 ? ""
+      : ` (${purses.map((p) => `${p.grader} ${dollars(this.committed(p.grader))} of ${dollars(p.ceilingCents)}`).join(", ")})`;
+    const held = `committed ${dollars(this.committed())} of ${dollars(this.opts.budgetCents)}${perGrader}, ${dollars(this.free())} free`;
     const also = this.inherited.length === 0 ? ""
       : this.opts.countInherited
         ? ` (including ${dollars(committedCents(this.inherited))} of bids already on the account, left alone but charged to the budget)`

@@ -179,9 +179,10 @@ describe("the Alt scan", () => {
     expect(lot.url).toBe(`https://alt.xyz/itm/${LISTING}`);
     expect(lot.closesAtUnixS).toBe(Math.floor(Date.parse(cycle.expiresAt) / 1000));
     expect(lot.cert).toBe("");
-    // Pristine outranks Gem Mint whatever the title says.
+    // The order is the full arts first now, so a Master Ball reverse holo and
+    // a plain one rank alike and price breaks the tie.
     expect(priorityRank({ grade: 10, gradingService: "CGC", title: "CGC 10", pristine: true }))
-      .toBeLessThan(priorityRank({ grade: 10, gradingService: "CGC", title: "CGC 10", pristine: false }));
+      .toBe(priorityRank({ grade: 10, gradingService: "CGC", title: "CGC 10", pristine: false }));
   });
 
   test("an English lot is English, and a numeric grade is a number", () => {
@@ -191,15 +192,20 @@ describe("the Alt scan", () => {
     expect(lot.pristine).toBe(false);
   });
 
-  test("Alt chases every PSA/CGC lot; Fanatics chases the list", () => {
+  test("Alt chases every PSA/CGC lot; Fanatics chases the list for CGC only", () => {
     expect(alt.chaseList).toBe(false);
-    expect(fanatics.chaseList).toBe(true);
+    expect(fanatics.chaseList).toEqual({ PSA: false, CGC: true });
     const plain: ScannedLot = {
       listingId: LISTING, url: listingUrl(LISTING), title: "2003 Pokemon Skyridge Holo Houndoom #H11 PSA 10 GEM MINT",
       grader: "PSA", grade: 10, cert: "12345678", currentBid: 40, bidCount: 2, auction: "Aug 28 - Sep 10, 2026", lot: lotLabel(LISTING), language: "English",
     };
     expect(selectCandidates([plain], () => {}, { chaseList: alt.chaseList }).candidates).toHaveLength(1);
-    expect(selectCandidates([plain], () => {}, { chaseList: fanatics.chaseList }).candidates).toHaveLength(0);
+    // PSA is off the list at Fanatics now, so a plain PSA lot is priced there too.
+    expect(selectCandidates([plain], () => {}, { chaseList: fanatics.chaseList }).candidates).toHaveLength(1);
+    // The same lot in a CGC slab still has to earn its place.
+    const cgc: ScannedLot = { ...plain, grader: "CGC", title: plain.title.replace("PSA 10 GEM MINT", "CGC 9") , grade: 9 };
+    expect(selectCandidates([cgc], () => {}, { chaseList: fanatics.chaseList }).candidates).toHaveLength(0);
+    expect(selectCandidates([cgc], () => {}, { chaseList: alt.chaseList }).candidates).toHaveLength(1);
   });
 
   test("a chased lot whose cert never came back is counted, not priced", () => {
