@@ -858,6 +858,9 @@ export async function runEbaySniper(): Promise<void> {
     const pools: { sellers: string[]; ag: boolean }[] = [{ sellers, ag: false }];
     if (!sellersOnly) pools.push({ sellers: [], ag: true });
     let summaries: ItemSummary[];
+    // What each pool turned up, and how much of it the other had already,
+    // so the line below can say where the lots came from.
+    const fromPool = { sellers: 0, guarantee: 0, both: 0 };
     try {
       const found = new Map<string, ItemSummary>();
       for (const { sellers: list, ag } of pools) {
@@ -868,7 +871,12 @@ export async function runEbaySniper(): Promise<void> {
           endsBeforeMs: now() + (ocrBeforeMin + scanEveryMin * 2) * 60_000,
           log: (l) => console.log(l),
         });
-        for (const hit of hits) found.set(hit.itemId, hit);
+        for (const hit of hits) {
+          if (found.has(hit.itemId)) fromPool.both++;
+          else if (ag) fromPool.guarantee++;
+          else fromPool.sellers++;
+          found.set(hit.itemId, hit);
+        }
       }
       summaries = [...found.values()];
     } catch (err) {
@@ -895,7 +903,10 @@ export async function runEbaySniper(): Promise<void> {
       touch();
     }
     fresh.sort((a, b) => a.endsAtMs - b.endsAtMs);
-    say(`${summaries.length} live auction(s) from the sellers, ${fresh.length} not yet read`);
+    say(`${summaries.length} live auction(s) closing inside the window` +
+      `: ${fromPool.sellers} from the named sellers, ${fromPool.guarantee} under Authenticity Guarantee elsewhere` +
+      `${fromPool.both > 0 ? `, ${fromPool.both} both` : ""}` +
+      ` — ${fresh.length} not yet read`);
 
     // Listings found by an earlier scan that have since vanished from the
     // search — ended early, or taken down — before they were ever read.
@@ -915,7 +926,7 @@ export async function runEbaySniper(): Promise<void> {
     const lots: ScannedLot[] = [];
     const byId = new Map<string, ItemRecord>();
     const readings = new Map<string, CertReading>();
-    const counts = { otherSeller: 0, notAg: 0, grader: 0, grade: 0, game: 0, noCert: 0, newSet: 0, tooSoon: 0, unread: 0, unreadable: 0, mismatched: 0 };
+    const counts = { otherSeller: 0, notAg: 0, ungraded: 0, grader: 0, grade: 0, game: 0, noCert: 0, newSet: 0, tooSoon: 0, unread: 0, unreadable: 0, mismatched: 0 };
     const allowed = new Set(sellers.map((s) => s.toLowerCase()));
     for (const r of toRead) {
       if (r.priceTries !== undefined && r.priceTries >= PRICE_SCANS) { reject(r, "Card Uploader never answered for the cert"); continue; }
@@ -954,7 +965,13 @@ export async function runEbaySniper(): Promise<void> {
         }
         continue;
       }
-      if (!GRADERS.includes(aspects.grader as Grader)) { counts.grader++; reject(r, `graded by ${aspects.grader || "nobody the listing names"}`); continue; }
+      if (!GRADERS.includes(aspects.grader as Grader)) {
+        // A raw card is not a rival grader's slab, and the guarantee pool is
+        // full of them — eBay authenticates ungraded cards too.
+        if (aspects.grader) { counts.grader++; reject(r, `graded by ${aspects.grader}`); }
+        else { counts.ungraded++; reject(r, "no grader named — a raw card, or a listing that does not say"); }
+        continue;
+      }
       if (!gradeAllowed(aspects.grader, aspects.grade, grades)) { counts.grade++; reject(r, `${aspects.grader} ${aspects.grade ?? "?"} is outside ${formatGradeRange(grades[aspects.grader as Grader])}`); continue; }
       if (aspects.game && !/pok[eé]mon/i.test(aspects.game)) { counts.game++; reject(r, `game: ${aspects.game}`); continue; }
       const guard = setGuard({ name: aspects.set, language: aspects.language, year: aspects.year, sets, now: scanNow, months: newSetMonths });
@@ -1017,7 +1034,7 @@ export async function runEbaySniper(): Promise<void> {
     }
     if (toRead.length > 0) {
       say(`read ${toRead.length}: ${lots.length} PSA/CGC Pokémon slab(s) in range with a cert` +
-        ` — dropped ${counts.otherSeller} other seller, ${counts.notAg} not AG, ${counts.grader} other grader, ${counts.grade} out of grade range, ${counts.game} other game, ${counts.noCert} no cert, ${counts.newSet} new set, ${counts.tooSoon} ending too soon, ${counts.unreadable} label unreadable` +
+        ` — dropped ${counts.otherSeller} other seller, ${counts.notAg} not AG, ${counts.ungraded} ungraded, ${counts.grader} other grader, ${counts.grade} out of grade range, ${counts.game} other game, ${counts.noCert} no cert, ${counts.newSet} new set, ${counts.tooSoon} ending too soon, ${counts.unreadable} label unreadable` +
         (counts.unread ? `, ${counts.unread} unreadable (next scan)` : ""));
       say(`${ocrBudget.spentToday()} label(s) read today${ocrPerDay > 0 ? ` of ${ocrPerDay}` : ""}`);
     }
