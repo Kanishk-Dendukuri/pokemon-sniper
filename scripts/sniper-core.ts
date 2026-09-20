@@ -175,6 +175,8 @@ import {
 } from "./carduploader-batch";
 import {
   BUYERS_PREMIUM,
+  buyersPremium,
+  setBuyersPremium,
   BidBook,
   DEFAULT_BUDGET_DOLLARS,
   allInCents,
@@ -213,7 +215,7 @@ import {
   type SalesRule,
 } from "./cert-price";
 
-export { BUYERS_PREMIUM };
+export { BUYERS_PREMIUM, buyersPremium, setBuyersPremium };
 
 // The sales rule, the basis rule and the price that comes out of them live in
 // ./cert-price, which scripts/verify-prices.ts reads too; every caller of the
@@ -856,18 +858,18 @@ export function applyRule(
     case "flat":
       rule = `flat $${tier.hammer}`;
       hammer = tier.hammer;
-      allIn = round2(hammer * (1 + BUYERS_PREMIUM));
+      allIn = round2(hammer * (1 + buyersPremium()));
       break;
     case "offset":
       rule = `market - $${tier.less}`;
       hammer = Math.floor(price - tier.less);
-      allIn = round2(hammer * (1 + BUYERS_PREMIUM));
+      allIn = round2(hammer * (1 + buyersPremium()));
       break;
     case "share":
       share = tier.share;
       rule = `${Math.round(tier.share * 1000) / 10}% all-in`;
       allIn = round2(price * tier.share);
-      hammer = Math.floor(allIn / (1 + BUYERS_PREMIUM));
+      hammer = Math.floor(allIn / (1 + buyersPremium()));
       break;
   }
 
@@ -1341,7 +1343,7 @@ export async function openCardUploader(opts: { headed: boolean; batchPrefix: str
 }
 
 /** Leaves the page behind for a post-mortem when a stage dies mid-run. */
-async function snapshotFailure(page: Page, outDir: string) {
+export async function snapshotFailure(page: Page, outDir: string) {
   await page.screenshot({ path: join(outDir, "failure.png"), fullPage: true }).catch(() => {});
   const html = await page.content().catch(() => null);
   if (html) writeFileSync(join(outDir, "failure.html"), html);
@@ -1591,7 +1593,7 @@ async function waitForJob(session: CuSession, id: string, expected: number, betw
  *
  * Returns a map keyed "GRADER:cert", covering whatever resolved.
  */
-async function identifyViaBatch(
+export async function identifyViaBatch(
   session: CuSession,
   candidates: Candidate[],
   batchPrefix: string,
@@ -1835,7 +1837,7 @@ export function evaluate(c: Candidate, price: CuPrice | undefined, now: Date): {
  */
 export function settle(row: Row, bid: Pick<PlacedBid, "status" | "currentBidCents">): void {
   if (bid.status !== "HIGH_BID" || !bid.currentBidCents) return;
-  const paid = round2((bid.currentBidCents / 100) * (1 + BUYERS_PREMIUM));
+  const paid = round2((bid.currentBidCents / 100) * (1 + buyersPremium()));
   row.final_paid_all_in = paid;
   row.market_pct = row.sales_median === "" ? "" : marketPct(paid, row.sales_median);
 }
@@ -1934,7 +1936,7 @@ function summaryMarkdown(
       `| Lot | Our max | All-in | Went for | Paid all-in | % of market | Outcome | Item |`,
       `|---|---|---|---|---|---|---|---|`);
     for (const r of bid) {
-      const allIn = (Number(r.bid_placed) * (1 + BUYERS_PREMIUM)).toFixed(2).replace(/\.00$/, "");
+      const allIn = (Number(r.bid_placed) * (1 + buyersPremium())).toFixed(2).replace(/\.00$/, "");
       const money = (v: number | "") => (v === "" ? "—" : `$${v}`);
       lines.push(`| ${r.lot} | **$${r.bid_placed}** | $${allIn} | ${money(r.final_bid)} | ${money(r.final_paid_all_in)} | ${r.market_pct === "" ? "—" : `${r.market_pct}%`} | ${r.bid_status} | [${r.title.slice(0, 60)}](${r.url}) |`);
     }
@@ -2196,7 +2198,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       : `🎯  ${venue.name} sniper — planning against the scan's own bid snapshot, sending nothing\n`);
 
   console.log(`    output       ${outDir}`);
-  console.log(`    ceiling      ${dollars(budgetCents)} all-in at once for this run (hammer + ${Math.round(BUYERS_PREMIUM * 100)}% buyer's premium); bids already on the account are left alone${countExistingBids ? " and charged to it" : " and not counted"}`);
+  console.log(`    ceiling      ${dollars(budgetCents)} all-in at once for this run (hammer + ${Math.round(buyersPremium() * 100)}% buyer's premium); bids already on the account are left alone${countExistingBids ? " and charged to it" : " and not counted"}`);
   console.log(`    fire         ${fireAfterMin} min after extended bidding opens${venue.closesTogether ? ", or the moment the auction reads seconds from its end" : ""}${live ? "" : " — for a live run; this one sends nothing"}`);
   console.log(`    max cards    ${maxCards > 0 ? maxCards : "every candidate"}`);
   console.log(`    batch        ${batchSize} cert(s) priced per round, ${concurrency} at a time; every candidate is priced`);

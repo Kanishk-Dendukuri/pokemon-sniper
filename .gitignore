@@ -5,13 +5,18 @@ node_modules/
 # Where a run writes: the bid list, the summary, the failure snapshots.
 sniper-runs/
 alt-sniper-runs/
+ebay-sniper-runs/
 sold-report-runs/
 pricing-batches/
 
 # Signed-in browser profiles. These are credentials.
 .fanatics-session/
 .alt-session/
+.ebay-session/
 .carduploader-session/
 
 .DS_Store
 *.log
+
+# Tesseract drops its language data wherever it is run from.
+eng.traineddata

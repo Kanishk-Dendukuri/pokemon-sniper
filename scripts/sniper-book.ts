@@ -32,6 +32,26 @@
 export const BUYERS_PREMIUM = 0.20;
 
 /**
+ * The premium this run prices with. Fanatics and Alt charge BUYERS_PREMIUM;
+ * eBay charges the buyer nothing on top of the hammer, and a venue with
+ * another rate says so at start-up with setBuyersPremium(). Every place a
+ * hammer becomes an all-in figure reads buyersPremium(), so one call at the
+ * start of a run reaches all of them.
+ */
+let activePremium = BUYERS_PREMIUM;
+
+/** The buyer's premium in force, as a share of the hammer: 0.20 for 20%. */
+export function buyersPremium(): number {
+  return activePremium;
+}
+
+/** Price with this premium from now on — what a venue does before its run starts. */
+export function setBuyersPremium(rate: number): void {
+  if (!(rate >= 0 && rate < 1)) throw new Error(`a buyer's premium is a share of the hammer between 0 and 1, got ${rate}`);
+  activePremium = rate;
+}
+
+/**
  * The ceiling a run holds its bids under when told nothing else. High on
  * purpose: nearly every bid is outbid and the ceiling only ever matters if a
  * table is mistyped, so a low one would cut the list off for no gain. What a
@@ -149,9 +169,23 @@ export function incrementSteps(ladder: Ladder): BidSteps {
   };
 }
 
-/** What a hammer price costs once the buyer's premium is on it. */
-export function allInCents(hammerCents: number): number {
-  return Math.round(hammerCents * (1 + BUYERS_PREMIUM));
+/**
+ * What a hammer price costs once the buyer's premium is on it, plus whatever
+ * the lot charges besides — shipping, at a house that bills it per lot. The
+ * extra is money out of the same budget, so it belongs in the all-in.
+ */
+export function allInCents(hammerCents: number, extraCents = 0): number {
+  return Math.round(hammerCents * (1 + buyersPremium())) + extraCents;
+}
+
+/**
+ * The other way round: the most to hammer so the all-in, extras and all,
+ * lands at or under `allInCents`. Rounded down, so the ceiling is never
+ * crossed by a cent. At a house with no premium this is a subtraction — bid
+ * $5 less on a lot that charges $5 to post.
+ */
+export function hammerForAllIn(allInCents: number, extraCents = 0): number {
+  return Math.floor((allInCents - extraCents) / (1 + buyersPremium()));
 }
 
 export function dollars(cents: number): string {
@@ -176,6 +210,12 @@ export type Biddable = {
   bidCount: number;
   /** Which card this is a copy of, for the per-card cap; two lots of one card share it. */
   cardKey?: string;
+  /**
+   * What this lot charges to post, when the house bills it per lot rather
+   * than folding it into a premium. Counted in the all-in and taken off the
+   * hammer, so the ceiling holds. Absent where postage is not the buyer's.
+   */
+  shippingCents?: number;
 };
 
 /**
@@ -190,15 +230,17 @@ export type CardCaps = { perCard: number };
  * lot's max. Called on the way out, right before the request, and it throws
  * rather than returns — a bid this cannot vouch for is not placed.
  */
-export function withinMax(cents: number, row: Pick<Biddable, "maxHammerCents" | "maxAllInCents" | "title">): number {
+export function withinMax(cents: number, row: Pick<Biddable, "maxHammerCents" | "maxAllInCents" | "title" | "shippingCents">): number {
   if (!Number.isInteger(cents) || cents <= 0) {
     throw new Error(`refusing to bid ${cents} cents on ${row.title}`);
   }
   if (cents > row.maxHammerCents) {
     throw new Error(`refusing to bid ${dollars(cents)} on ${row.title}: the max hammer is ${dollars(row.maxHammerCents)}`);
   }
-  if (allInCents(cents) > row.maxAllInCents) {
-    throw new Error(`refusing to bid ${dollars(cents)} on ${row.title}: ${dollars(allInCents(cents))} all-in is over the max of ${dollars(row.maxAllInCents)}`);
+  const allIn = allInCents(cents, row.shippingCents ?? 0);
+  if (allIn > row.maxAllInCents) {
+    const postage = row.shippingCents ? ` (${dollars(row.shippingCents)} of it postage)` : "";
+    throw new Error(`refusing to bid ${dollars(cents)} on ${row.title}: ${dollars(allIn)} all-in${postage} is over the max of ${dollars(row.maxAllInCents)}`);
   }
   return cents;
 }

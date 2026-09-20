@@ -6,13 +6,16 @@
   "scripts": {
     "sniper": "tsx scripts/fanatics-sniper.ts",
     "sniper:alt": "tsx scripts/alt-sniper.ts",
+    "sniper:ebay": "tsx scripts/ebay-sniper.ts",
     "sold-report": "tsx scripts/sold-report.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "psa-deals": "tsx scripts/psa-deals.ts"
   },
   "dependencies": {
     "csv-parse": "^7.0.2",
-    "playwright": "^1.62.1"
+    "playwright": "^1.62.1",
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "@types/node": "^20",

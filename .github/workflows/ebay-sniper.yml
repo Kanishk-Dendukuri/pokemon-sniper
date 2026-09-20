@@ -1,0 +1,176 @@
+# eBay sniper: scan the sellers' live auctions, price what is worth a bid, and
+# say what it would bid — on this runner it never bids.
+#
+# The eBay sniper's real home is the PC it runs on round the clock: the bid
+# goes through a signed-in browser (eBay's bidding API is closed to new
+# applications and its licence forbids a sniper outright), and a hosted runner
+# has no such session and no six-hour-plus life to wait out a close in. So this
+# workflow is the planning half only — one scan, prices, and the list of lots
+# it would have bid on, as a CSV. --live is not offered here and the code
+# refuses it without a rehearsed bid flow anyway. See the README's eBay section
+# for the run that does bid.
+#
+# What it needs, as repository secrets: EBAY_CLIENT_ID and EBAY_CLIENT_SECRET
+# (a developer.ebay.com production keyset — the sandbox keys will not do), the
+# CARDUPLOADER_EMAIL / CARDUPLOADER_PASSWORD the other two snipers already use
+# for the per-cert prices. No key is needed to read the slab labels — that is
+# Tesseract, installed on the runner below — but none of these sellers publish
+# a cert number anywhere, so without it nothing can be priced.
+#
+# The postcode box is required, for two reasons. eBay will not filter on
+# Authenticity Guarantee at all unless the request says where the buyer is —
+# it answers HTTP 400 — and postage is money out of the same budget as the
+# hammer: the sniper takes the listing's own postage off what it bids, so
+# hammer plus postage stays under the tier table's all-in. A calculated
+# postage rate is quoted to this postcode; where eBay quotes none, the
+# "unquoted postage" box stands in. Fill it in with the postcode the cards
+# would ship to.
+#
+# The tier table, the value basis and the sales rule are the same boxes as
+# fanatics-sniper.yml and alt-sniper.yml, and mean the same things — except
+# that eBay charges the buyer no premium, so an all-in percentage here is a
+# percentage of the hammer plus postage.
+name: eBay sniper
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip:
+        description: "Postcode the cards ship to, five digits — REQUIRED: eBay refuses the Authenticity Guarantee filter without one, and postage is quoted to it"
+        type: string
+        default: ""
+      ocr_before:
+        description: "Minutes before a lot closes to read its slab label — a single run only sees lots closing inside this window"
+        type: string
+        default: "240"
+      budget:
+        description: "Ceiling on what the run may spend, all-in (hammer + postage); the run ends when it is bought up to"
+        type: string
+        default: "10000"
+      sellers:
+        description: "eBay usernames bought from guaranteed or not, comma separated"
+        type: string
+        default: "zandgemporium,ryans_cardhouse,probstein123,psa"
+      sellers_only:
+        description: "Buy from the sellers above and nobody else (unticked: also every Pokémon auction under Authenticity Guarantee, whoever sells it)"
+        type: boolean
+        default: false
+      max_wins:
+        description: "Lots to win before the run is over; 0 is as many as the budget stretches to"
+        type: string
+        default: "0"
+      psa_tiers:
+        description: "PSA tier table, in dollars of the bid basis: from-to: flat $N | market - $N | N%"
+        type: string
+        default: ""
+      cgc_tiers:
+        description: "CGC tier table, the same way"
+        type: string
+        default: ""
+      value_basis:
+        description: "How the recent sales become the one price the tier tables' percentages multiply"
+        type: choice
+        default: "2nd lowest"
+        options:
+          - "lowest"
+          - "2nd lowest"
+          - "average of the 3 lowest"
+          - "drop the lowest and the highest, average the rest"
+          - "median"
+          - "average"
+      sales_rule:
+        description: "How many recent sales are looked at and how old the oldest may be, e.g. 5 sales in 60 days"
+        type: string
+        default: ""
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # One scan: the search, the listings read, the prices, the maths. No close
+    # is waited out here, so this is generous rather than long.
+    timeout-minutes: 60
+
+    steps:
+      - name: Check the keys
+        env:
+          ID: ${{ secrets.EBAY_CLIENT_ID }}
+          SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+        run: |
+          if [ -z "$ID" ] || [ -z "$SECRET" ]; then
+            echo "::error::Set the EBAY_CLIENT_ID and EBAY_CLIENT_SECRET repository secrets — a developer.ebay.com production keyset."
+            exit 1
+          fi
+          case "$ID$SECRET" in
+            *SBX*) echo "::error::Those are sandbox keys and the sandbox has no real listings. Copy the Production App ID and Cert ID from developer.ebay.com."; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The cert number is read off the slab photograph, and that is
+      # Tesseract. Ubuntu runners do not carry it.
+      - name: Install Tesseract
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      # Card Uploader is a browser session, so the scan needs Chromium even
+      # though no bid is placed. Cached on the lock file, as the other snipers
+      # do it.
+      - name: Cache Playwright's Chromium
+        id: playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - if: steps.playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # --ocr-per-day is fixed rather than a box: a planning run is a look at
+      # what the sniper would do, and a dispatch left running should not be
+      # able to spend without limit on reading labels. The PC run, which is
+      # the one that actually bids, takes --ocr-per-day on the command line.
+      - name: Scan and price
+        run: >-
+          npm run sniper:ebay --
+          --once
+          --budget=${{ inputs.budget || '10000' }}
+          --ocr-before=${{ inputs.ocr_before || '240' }}
+          --max-wins=${{ inputs.max_wins || '0' }}
+          --ocr-per-day=300
+        env:
+          EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+          EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+          # Where postage is worked out to. Blank leaves calculated rates
+          # unpriced and the assumption above stands in for them.
+          EBAY_ZIP: ${{ inputs.zip }}
+          CARDUPLOADER_EMAIL: ${{ secrets.CARDUPLOADER_EMAIL }}
+          CARDUPLOADER_PASSWORD: ${{ secrets.CARDUPLOADER_PASSWORD }}
+          # Through the environment rather than the command line: these carry
+          # "$", commas and spaces, which a shell would eat. Blank means the
+          # code's own defaults.
+          SELLERS: ${{ inputs.sellers }}
+          SELLERS_ONLY: ${{ inputs.sellers_only }}
+          TIERS_PSA: ${{ inputs.psa_tiers }}
+          TIERS_CGC: ${{ inputs.cgc_tiers }}
+          VALUE_BASIS: ${{ inputs.value_basis }}
+          SALES_RULE: ${{ inputs.sales_rule }}
+
+      # Every listing the scan looked at: what it is worth, what postage it
+      # charges, what the run would have bid, and why anything was passed over.
+      - name: Upload the bid list
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ebay-bids
+          path: ebay-sniper-runs/ebay-bids.csv
+          if-no-files-found: ignore
+          retention-days: 30
