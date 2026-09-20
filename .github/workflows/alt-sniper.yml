@@ -29,6 +29,16 @@
 # --auction="Sep 04" (an auction's id or any part of its name); there is no box
 # for it here, since workflow_dispatch allows ten and these are the ten.
 #
+# Firing early. The box takes a negative — "-30", or "30 before" — and the
+# bids then go on that long before extended bidding opens, rather than after.
+# It buys the lots that are gone before extended bidding starts at all, and a
+# run that does not have to still be alive hours later. What it costs is the
+# thing the late fire was built to avoid: a bid standing from before the open
+# is one every other bidder has until the close to answer, and on 13 Sep 433
+# bids placed from 4 PM had 189 of them beaten by someone coming back later.
+# A fire time already past when the run starts is not an error — the bids go
+# on as soon as the list is priced, and the run says so.
+#
 # The tier table — what to bid on a card by what it is worth — is typed into
 # the run, one line per grader, in dollars of the card's bid basis (the value
 # basis box, the second-lowest of its five recent sales by default). The short
@@ -169,7 +179,7 @@ on:
         type: string
         default: "4, CGC 4"
       fire_after_minutes:
-        description: "Minutes after extended bidding opens (9:00 PM ET) to put the bids on (or sooner, the moment the auction reads seconds from its end)"
+        description: 'Minutes after extended bidding opens (9:00 PM ET) to put the bids on (or sooner, the moment the auction reads seconds from its end). Negative fires before it instead: "-30" or "30 before"'
         type: string
         default: "100"
       token:

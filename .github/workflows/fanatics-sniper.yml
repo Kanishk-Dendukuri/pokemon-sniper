@@ -38,6 +38,16 @@
 # scripts/fanatics-sniper.ts and scripts/fanatics-bidder.ts for the scan, the
 # session and the bid ladder. The same pipeline runs at Alt: alt-sniper.yml.
 #
+# Firing early. The box takes a negative — "-30", or "30 before" — and the
+# bids then go on that long before extended bidding opens, rather than after.
+# It buys the lots that are gone before extended bidding starts at all, and a
+# run that does not have to still be alive hours later. What it costs is the
+# thing the late fire was built to avoid: a bid standing from before the open
+# is one every other bidder has until the close to answer, and on 13 Sep 433
+# bids placed from 4 PM had 189 of them beaten by someone coming back later.
+# A fire time already past when the run starts is not an error — the bids go
+# on as soon as the list is priced, and the run says so.
+#
 # The tier table — what to bid on a card by what it is worth — is typed into
 # the run, one line per grader, in dollars of the card's bid basis (the value
 # basis box, the second-lowest of its five recent sales by default). The short
@@ -172,7 +182,7 @@ on:
         type: string
         default: "4, CGC 4"
       fire_after_minutes:
-        description: "Minutes after extended bidding opens (7:00 PM PT) to put the bids on"
+        description: 'Minutes after extended bidding opens (7:00 PM PT) to put the bids on. Negative fires before it instead: "-30" or "30 before"'
         type: string
         default: "27"
       token:

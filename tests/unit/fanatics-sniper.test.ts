@@ -23,7 +23,9 @@ import {
   parallel,
   prettyPattern,
   salesWindowDays,
+  formatFireOffset,
   formatTiers,
+  parseFireOffset,
   marketPrice,
   masterBallAllowed,
   matchKeywords,
@@ -372,6 +374,51 @@ describe("parallel", () => {
   });
 });
 
+describe("when the bids go on", () => {
+  test("after the open, before it, or the open itself", () => {
+    expect(parseFireOffset("27")).toBe(27);
+    expect(parseFireOffset("27 after")).toBe(27);
+    expect(parseFireOffset("0")).toBe(0);
+    expect(parseFireOffset("-30")).toBe(-30);
+    expect(parseFireOffset("30 before")).toBe(-30);
+    expect(parseFireOffset("before 30")).toBe(-30);
+    expect(parseFireOffset("30 min early")).toBe(-30);
+    expect(() => parseFireOffset("before 30 after")).toThrow(/both before and after/);
+    expect(() => parseFireOffset("soon")).toThrow(/cannot read the fire time/);
+  });
+
+  test("the banner says which side of the open it is on", () => {
+    expect(formatFireOffset(27)).toBe("27 min after extended bidding opens");
+    expect(formatFireOffset(-30)).toBe("30 min before extended bidding opens");
+    expect(formatFireOffset(0)).toBe("the moment extended bidding opens");
+  });
+
+  test("a negative offset puts the fire before the scheduled open", () => {
+    const open = 1_788_746_400;
+    expect(fireAtUnixS(open, 27)).toBe(open + 27 * 60);
+    expect(fireAtUnixS(open, -30)).toBe(open - 30 * 60);
+    expect(fireAtUnixS(open, 0)).toBe(open);
+  });
+
+  test("the run takes it from the flag, the environment, or the venue", () => {
+    expect(fireAfterFromArgs(27, {})).toBe(27);
+    expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "100" })).toBe(100);
+    expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "-45" })).toBe(-45);
+    expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "45 before" })).toBe(-45);
+    expect(() => fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "whenever" })).toThrow(/--fire-after: cannot read the fire time/);
+  });
+
+  test("the fire is due at its time, whichever side of the open that is", () => {
+    const open = 1_788_746_400;
+    const early = fireAtUnixS(open, -30);
+    const shared = { closesTogether: false, auction: null };
+    expect(timeToFire({ nowUnixS: early - 1, fireAtUnixS: early, ...shared }).fire).toBe(false);
+    expect(timeToFire({ nowUnixS: early, fireAtUnixS: early, ...shared })).toEqual({ fire: true, why: "the fire time" });
+    // Already past when the run started: it fires as soon as it is asked.
+    expect(timeToFire({ nowUnixS: open, fireAtUnixS: early, ...shared }).fire).toBe(true);
+  });
+});
+
 describe("card priority order", () => {
   const lot = (gradingService: string, grade: number, title = "") => ({ gradingService, grade, title });
 
@@ -607,13 +654,14 @@ describe("the last cut before the bid list", () => {
  * The fire: when the bids go on, and what a re-scan says about a lot.
  */
 describe("the fire", () => {
-  test("fire-after: the venue's own unless told, the environment when told, and only a number of minutes", () => {
+  test("fire-after: the venue's own unless told, the environment when told, and only a fire time", () => {
     expect(fireAfterFromArgs(27, {})).toBe(27);
     expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: " 100 " })).toBe(100);
     expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "0" })).toBe(0);
     expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "2.5" })).toBe(2.5);
-    expect(() => fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "-1" })).toThrow(/minutes/);
-    expect(() => fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "late" })).toThrow(/minutes/);
+    // A minus sign is a fire before the open, not an error — see parseFireOffset.
+    expect(fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "-1" })).toBe(-1);
+    expect(() => fireAfterFromArgs(27, { FIRE_AFTER_MINUTES: "late" })).toThrow(/cannot read the fire time/);
   });
 
   test("the fire is so many minutes after extended bidding was scheduled to open", () => {

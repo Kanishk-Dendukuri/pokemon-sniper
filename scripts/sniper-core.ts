@@ -117,7 +117,12 @@
  *   --fire-after=27       minutes after extended bidding opens to put the
  *                         bids on; the FIRE_AFTER_MINUTES environment variable
  *                         does the same, for a workflow input (default: the
- *                         venue's own — Fanatics 27, Alt 100)
+ *                         venue's own — Fanatics 27, Alt 100). A negative
+ *                         number fires before the open instead — "-30",
+ *                         "30 before" or --fire-before=30 — which buys the
+ *                         lots that are gone before extended bidding starts,
+ *                         at the cost of leaving the bids standing where
+ *                         anyone has until the close to answer them
  *   --tiers-psa=…         the tier table for PSA, and --tiers-cgc=… for CGC,
  *                         written as "$7.50-8: flat $5, $8-10: market - $3,
  *                         $10-90: 85%, $90-450: 80%" — or, where a band is to
@@ -846,19 +851,54 @@ export function graderCopyCapsFromArgs(env: Record<string, string | undefined> =
 }
 
 /**
- * When the bids go on, as this run was told: --fire-after, else the
- * FIRE_AFTER_MINUTES environment variable, else the venue's own default.
- * Minutes after extended bidding was scheduled to open; 0 is the open itself.
- * Anything that is not a number of minutes stops the run before the scan.
+ * When the bids go on, as minutes either side of the moment extended bidding
+ * was scheduled to open: 27 is 27 minutes after it, -30 is half an hour
+ * before it, 0 is the open itself.
+ *
+ * Before the open is worth having and is not the usual thing to want. The
+ * late fire exists because a bid placed early is one the other bidder has
+ * until the close to answer — 13 Sep: 433 bids from 4 PM, 189 of them beaten
+ * by someone coming back later. What firing early buys is the lots that are
+ * gone before extended bidding starts at all, and a run that is not waiting
+ * on a six-hour job to still be alive at 10:40 PM.
+ *
+ * "-30", "30 before" and "before 30" all read as half an hour early; "27"
+ * and "27 after" as 27 minutes late.
+ */
+export function parseFireOffset(text: string): number {
+  const t = text.trim().toLowerCase().replace(/\s+/g, " ");
+  const m = /^(?:(before|after|-|\+)\s*)?(\d+(?:\.\d+)?)\s*(?:min(?:ute)?s?)?\s*(before|after|early|late)?$/.exec(t);
+  if (!m) throw new Error(`cannot read the fire time "${text}": want "27", "-30" or "30 before"`);
+  const minutes = Number(m[2]);
+  if (!Number.isFinite(minutes)) throw new Error(`cannot read the fire time "${text}": want "27", "-30" or "30 before"`);
+  const early = m[1] === "before" || m[1] === "-" || m[3] === "before" || m[3] === "early";
+  const late = m[1] === "after" || m[1] === "+" || m[3] === "after" || m[3] === "late";
+  if (early && late) throw new Error(`"${text}" is both before and after the open — pick one`);
+  return early ? -minutes : minutes;
+}
+
+/** The fire time in words, for the banner. */
+export function formatFireOffset(minutes: number): string {
+  if (minutes === 0) return "the moment extended bidding opens";
+  return `${Math.abs(minutes)} min ${minutes < 0 ? "before" : "after"} extended bidding opens`;
+}
+
+/**
+ * When the bids go on, as this run was told: --fire-after (or --fire-before,
+ * which is the same thing the other way round), else the FIRE_AFTER_MINUTES
+ * environment variable, else the venue's own default. Anything that is not a
+ * fire time stops the run before the scan.
  */
 export function fireAfterFromArgs(defaultMinutes: number, env: Record<string, string | undefined> = process.env): number {
+  const before = opt("fire-before", "").trim();
+  if (before) return -Math.abs(parseFireOffset(before));
   const text = opt("fire-after", env.FIRE_AFTER_MINUTES ?? "").trim();
   if (!text) return defaultMinutes;
-  const minutes = Number(text);
-  if (!Number.isFinite(minutes) || minutes < 0) {
-    throw new Error(`--fire-after must be a number of minutes, 0 or more, got "${text}"`);
+  try {
+    return parseFireOffset(text);
+  } catch (err) {
+    throw new Error(`--fire-after: ${err instanceof Error ? err.message : err}`);
   }
-  return minutes;
 }
 
 /**
@@ -900,7 +940,7 @@ export function salesRuleFromArgs(env: Record<string, string | undefined> = proc
   }
 }
 
-/** The moment the bids go on: so many minutes after extended bidding was scheduled to open. */
+/** The moment the bids go on: so many minutes either side of the scheduled open. */
 export function fireAtUnixS(scheduledOpenUnixS: number, fireAfterMinutes: number): number {
   return scheduledOpenUnixS + Math.round(fireAfterMinutes * 60);
 }
@@ -2801,8 +2841,9 @@ export interface Venue {
   closesTogether: boolean;
   /**
    * When the bids go on, unless the run is told otherwise: minutes after
-   * extended bidding was scheduled to open. The house's own rule for closing
-   * decides it — see each venue's file.
+   * extended bidding was scheduled to open, or before it where the run asks
+   * for a negative. The house's own rule for closing decides the default —
+   * see each venue's file.
    */
   fireAfterMinutes: number;
   /** The lot's page, so a log line can be clicked through to what was bid on. */
@@ -2900,7 +2941,10 @@ export async function runSniper(venue: Venue): Promise<void> {
 
   console.log(`    output       ${outDir}`);
   console.log(`    ceiling      ${dollars(budgetCents)} all-in at once for this run (hammer + ${Math.round(buyersPremium() * 100)}% buyer's premium); bids already on the account are left alone${countExistingBids ? " and charged to it" : " and not counted"}`);
-  console.log(`    fire         ${fireAfterMin} min after extended bidding opens${venue.closesTogether ? ", or the moment the auction reads seconds from its end" : ""}${live ? "" : " — for a live run; this one sends nothing"}`);
+  console.log(`    fire         ${formatFireOffset(fireAfterMin)}${venue.closesTogether ? ", or the moment the auction reads seconds from its end" : ""}${live ? "" : " — for a live run; this one sends nothing"}`);
+  if (fireAfterMin < 0) {
+    console.log(`                 early on purpose: the bids stand from before the open, which is ${Math.abs(fireAfterMin)} min more for anyone to answer them in`);
+  }
   console.log(`    max cards    ${maxCards > 0 ? maxCards : "every candidate"}`);
   console.log(`    batch        ${batchSize} cert(s) priced per round, ${concurrency} at a time; every candidate is priced`);
   for (const grader of GRADERS) {
@@ -2927,7 +2971,9 @@ export async function runSniper(venue: Venue): Promise<void> {
   console.log(`    ${lots.length} live PSA/CGC Pokémon lot(s)`);
   if (Number.isFinite(closesAt)) {
     console.log(`    ${untilClose(closesAt)}  (${fmtLocal(closesAt, venue.timeZone, venue.zoneLabel)})`);
-    console.log(`    the bids go on at ${fmtLocal(fireAtUnixS(closesAt, fireAfterMin), venue.timeZone, venue.zoneLabel)}${live ? "" : " — in a live run"}`);
+    const fireAtS = fireAtUnixS(closesAt, fireAfterMin);
+    console.log(`    the bids go on at ${fmtLocal(fireAtS, venue.timeZone, venue.zoneLabel)}${live ? "" : " — in a live run"}`
+      + (fireAtS <= Math.floor(now.getTime() / 1000) ? " — already past, so they go on as soon as the list is priced" : ""));
   }
 
   // 2. Chase list, where the house has one.
