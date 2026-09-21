@@ -79,11 +79,12 @@
  *      rule for the bands that name none (--value-basis, --sales-rule; see
  *      ./cert-price).
  *      A lot is worth a bid when the cert resolved, those sales all fall
- *      inside the window, neither that price nor the median
- *      of the same sales is a value no pack can award (the sourcing check:
- *      lib/odds-config.ts unawardableRanges — under $7.50, over $16,925, or
- *      in the hole between two tiers), that price sits inside the tier
- *      table, and the max hammer that comes out is above the current bid. No
+ *      inside the window, that price sits inside the tier table, and the max
+ *      hammer that comes out is above the current bid. A run given
+ *      --awardable-only also refuses a card worth a figure no pack could
+ *      award (lib/odds-config.ts unawardableRanges — under $7.50, over
+ *      $16,925, or in the hole between two tiers); off by default, since
+ *      what the app does with a card it has bought is the app's business. No
  *      more than the per-card cap — --max-copies-per-card, 4 by default — of
  *      one card are winning or won in one auction, whatever their grade or
  *      grader; nothing is read from the database. The median of the same sales is carried along as the
@@ -156,6 +157,11 @@
  *                         off older sales; ", at least 3" settles for fewer.
  *                         SALES_RULE does the same (default
  *                         DEFAULT_SALES_RULE)
+ *   --awardable-only      refuse a lot whose card is worth a figure no pack
+ *                         could award, the way the app's own review queue
+ *                         does (AWARDABLE_ONLY=1 for a workflow). Off unless
+ *                         asked for: the sniper buys cards, and what becomes
+ *                         of one afterwards is not the bid's business
  *   --max-copies-per-card=4  the most lots of one card to be winning or have
  *                         won at once, counted across every grade and both
  *                         graders; the MAX_COPIES_PER_CARD environment
@@ -1580,6 +1586,35 @@ export function marketPct(paidAllIn: number, median: number): number | "" {
 }
 
 /**
+ * Whether this run refuses a lot the packs could not award.
+ *
+ * Off. The sniper buys cards; what the app then does with one is the app's
+ * business, and a lot worth $7.20 is a fine thing to win at $6 whether or not
+ * a pack has a slot for it. The check came in with odds v6 on 2026-09-16,
+ * when the two halves were one repository and a slab below the ladder's floor
+ * was quarantined out of the draw on arrival — a run that wants that rule
+ * back asks for it with --awardable-only.
+ */
+let activeSourcingCheck = false;
+
+/** Whether the ladder is consulted before a bid. */
+export function sourcingCheck(): boolean {
+  return activeSourcingCheck;
+}
+
+/** Consult the ladder from now on, or stop — what --awardable-only does. */
+export function setSourcingCheck(on: boolean): void {
+  activeSourcingCheck = on;
+}
+
+/** Whether this run was asked to buy only what a pack could award. */
+export function sourcingCheckFromArgs(env: Record<string, string | undefined> = process.env): boolean {
+  if (process.argv.includes("--awardable-only")) return true;
+  const text = (env.AWARDABLE_ONLY ?? "").trim().toLowerCase();
+  return text === "1" || text === "true" || text === "yes";
+}
+
+/**
  * The sourcing check: whether a lot's card is one a pack could ever award.
  *
  * The packs award cards by value against the ladder in lib/odds-config.ts, and
@@ -2517,9 +2552,10 @@ export function evaluate(c: Candidate, price: CuPrice | undefined, now: Date): {
   if (basis.price === null) { row.reason = basis.reason; return { row, worthy: false }; }
   row.market_price = basis.price;
 
-  // The sourcing check comes before the table: a card no pack can award is
-  // not bought at any price, whatever table this run was given.
-  const unawardable = unawardableLotReason({ medianDollars: basis.median, basisDollars: basis.price });
+  // The sourcing check, where the run asked for one: a card no pack can award
+  // is not bought at any price, whatever table this run was given. Off unless
+  // --awardable-only says otherwise — see sourcingCheck().
+  const unawardable = sourcingCheck() ? unawardableLotReason({ medianDollars: basis.median, basisDollars: basis.price }) : null;
   if (unawardable) {
     row.unawardable = unawardable;
     row.reason = `unawardable: ${unawardable}`;
@@ -2534,7 +2570,7 @@ export function evaluate(c: Candidate, price: CuPrice | undefined, now: Date): {
 
   // The band's own price can land somewhere the first one did not, so the
   // ladder is asked about the figure the bid is actually made of.
-  const stillUnawardable = unawardableLotReason({ medianDollars: basis.median, basisDollars: bid.price });
+  const stillUnawardable = sourcingCheck() ? unawardableLotReason({ medianDollars: basis.median, basisDollars: bid.price }) : null;
   if (stillUnawardable) {
     row.unawardable = stillUnawardable;
     row.reason = `unawardable: ${stillUnawardable}`;
@@ -2920,6 +2956,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   requireSomethingToBidOn(live);
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setGraderCopyCaps(graderCopyCapsFromArgs());
+  setSourcingCheck(sourcingCheckFromArgs());
   setSalesRule(salesRuleFromArgs());
   setBasis(basisFromArgs());
   const fireAfterMin = fireAfterFromArgs(venue.fireAfterMinutes);
@@ -2955,6 +2992,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   if (noTable) console.log(`    ⚠️  ${noTable}`);
   const graderCaps = Object.entries(cardCaps().perCardByGrader ?? {});
   console.log(`    grades       ${GRADERS.map((g) => `${g} ${formatGradeRange(gradeRanges()[g])}`).join(", ")}`);
+  if (sourcingCheck()) console.log(`    sourcing     only cards a pack could award are bought (--awardable-only): $7.50 to $16,925, nothing in the jackpot hole`);
   console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` +
     (graderCaps.length > 0 ? `, and at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} of it` : ""));
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);

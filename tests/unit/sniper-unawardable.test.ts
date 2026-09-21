@@ -4,7 +4,7 @@
  * given, and the verdict travels with the row so nothing downstream bids on
  * it either.
  */
-import { beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { unawardableRanges } from "@/lib/odds-config";
 import { AltSession } from "@/scripts/alt-bidder";
 import { FanaticsSession } from "@/scripts/fanatics-bidder";
@@ -16,6 +16,8 @@ import {
   evaluate,
   parseTiers,
   selectCandidates,
+  setSourcingCheck,
+  sourcingCheckFromArgs,
   setTierTable,
   tierFloor,
   tierTable,
@@ -63,7 +65,16 @@ const priced = (prices: number[]): CuPrice => ({
 // Every grader starts switched off now: a run bids nothing until it is given
 // a tier table. These tests are about the table that was fitted, so they ask
 // for it by name rather than leaning on a default that no longer exists.
-beforeEach(() => setTierTable(DEFAULT_TIERS));
+//
+// The sourcing check is off unless a run asks for it (--awardable-only): the
+// sniper buys cards, and what the app does with one afterwards is the app's
+// business. These tests are about what the check does when it is on, so they
+// turn it on.
+beforeEach(() => {
+  setTierTable(DEFAULT_TIERS);
+  setSourcingCheck(true);
+});
+afterEach(() => setSourcingCheck(false));
 
 describe("what no pack can award", () => {
   test("under the ladder's floor, whichever figure is the low one", () => {
@@ -111,6 +122,26 @@ describe("what no pack can award", () => {
     expect(DEFAULT_TIERS.CGC.floor).toBe(7.5);
     expect(tierFloor("PSA", DEFAULT_TIERS)).toBe(ladder.floorCents / 100);
     expect(tierFloor("CGC", DEFAULT_TIERS)).toBe(ladder.floorCents / 100);
+  });
+});
+
+describe("who asks for the sourcing check", () => {
+  test("off unless the run asks: a $7.20 card is bought like any other", () => {
+    setSourcingCheck(false);
+    const { row, worthy } = evaluate(candidate(), priced([7.25, 7, 7, 6.5, 6]), NOW);
+    expect(row.unawardable).toBe("");
+    expect(row.reason).not.toMatch(/unawardable/);
+    // The table is what decides it now — $7 is under the fitted $7.50 floor.
+    expect(worthy).toBe(false);
+    expect(row.reason).toMatch(/under the \$7\.5 PSA floor/);
+  });
+
+  test("the flag and the environment variable both ask for it", () => {
+    expect(sourcingCheckFromArgs({})).toBe(false);
+    expect(sourcingCheckFromArgs({ AWARDABLE_ONLY: "" })).toBe(false);
+    expect(sourcingCheckFromArgs({ AWARDABLE_ONLY: "1" })).toBe(true);
+    expect(sourcingCheckFromArgs({ AWARDABLE_ONLY: "true" })).toBe(true);
+    expect(sourcingCheckFromArgs({ AWARDABLE_ONLY: "no" })).toBe(false);
   });
 });
 
