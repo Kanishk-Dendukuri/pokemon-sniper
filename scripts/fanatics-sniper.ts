@@ -111,6 +111,23 @@ export function pokemonCategories(facet: Record<string, number> | undefined): st
  */
 const AUCTION_WINDOW_DAYS = 7;
 
+/**
+ * How long after its scheduled end an auction is still worth scanning.
+ *
+ * "auctionEndDatetime" is when extended bidding *opens*, not when the auction
+ * is over. Fanatics then closes its lots one by one — a lot nobody bids on
+ * between 7:00 and 7:30 PM PT closes at 7:30, after that five minutes after
+ * its last bid, and after 8:00 one minute after — so the auction goes on
+ * taking bids for an hour or two past that timestamp. A run started inside
+ * that window wants the auction that is closing, not next Sunday's.
+ *
+ * It was `t > nowS`, and on 2026-09-20 a run dispatched at 7:02 PM PT — two
+ * minutes after the open, with lots still closing for another hour — scanned
+ * WA245 instead of WA244 and bid on nothing. Three hours covers the longest
+ * close seen; anything older is over, whatever the lagging status facet says.
+ */
+const CLOSING_GRACE_S = 3 * 3_600;
+
 // ── Fanatics search ───────────────────────────────────────────────────────────
 
 /**
@@ -359,12 +376,14 @@ async function scanFanatics(keyer: AlgoliaKey, now: Date, quiet = false): Promis
   });
   const categories = pokemonCategories(facets.facets?.subCategory1);
   const nowS = Math.floor(now.getTime() / 1000);
+  // An auction whose extended bidding opened in the last few hours is still
+  // closing, lot by lot, and is the one a run started this evening means.
   const open = Object.keys(facets.facets?.auctionEndDatetime ?? {})
     .map(Number)
-    .filter((t) => t > nowS)
+    .filter((t) => t > nowS - CLOSING_GRACE_S)
     .sort((a, b) => a - b);
 
-  if (open.length === 0) throw new Error("No Weekly Auction with a future end time has any Pokémon lots — nothing to scan.");
+  if (open.length === 0) throw new Error("No Weekly Auction still open has any Pokémon lots — nothing to scan.");
 
   // This week's close only. If the soonest is somehow further out than the
   // window — a run right after a close, or a skipped week — take it anyway
@@ -373,7 +392,11 @@ async function scanFanatics(keyer: AlgoliaKey, now: Date, quiet = false): Promis
   const ends = soon.length > 0 ? soon : [open[0]];
   const skipped = open.filter((t) => !ends.includes(t));
 
+  const closing = ends.filter((t) => t <= nowS);
   say(`    ${ends.length} auction(s) closing within ${AUCTION_WINDOW_DAYS} days: ${ends.map((t) => fmtPacific(t)).join(", ")}`);
+  if (closing.length > 0) {
+    say(`    ${closing.length} of them opened extended bidding already (${closing.map((t) => fmtPacific(t)).join(", ")}) — still closing lot by lot, so the bids go on at once`);
+  }
   if (skipped.length > 0) {
     say(`    skipping ${skipped.length} later auction(s): ${skipped.map((t) => fmtPacific(t)).join(", ")}`);
   }
