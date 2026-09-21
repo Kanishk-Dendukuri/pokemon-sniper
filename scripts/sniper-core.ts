@@ -1044,13 +1044,15 @@ const DEFAULT_MAX_CARDS = 0;
  * A round is a pass of lookups, a Card Uploader job for the survivors, and a
  * bidding pass. Bigger rounds mean fewer jobs and less per-job overhead; a
  * round is also the time between bidding passes, and the bids are watched
- * while the job runs anyway. 400 is a minute or so of lookups at the measured
- * rate, and at the survival rates seen — four in five at the top of the list,
- * fewer further down — its survivors fit one or two jobs under the 200-cert
- * cap. It is the same size near the close as far from it: the bids are
- * watched on their own clock, not the round's.
+ * while the job runs anyway. 1,000 is a few minutes of lookups at the measured
+ * rate; its survivors are several jobs under Card Uploader's 200-cert cap,
+ * which is cheaper than the rounds it saves. It is the same size near the
+ * close as far from it: the bids are watched on their own clock, not the
+ * round's, so the only thing round size decides now is how fast the list is
+ * got through. Raised from 400 on 2026-09-20, when an 8,976-lot auction was
+ * pricing slower than it was closing.
  */
-const DEFAULT_BATCH = 400;
+const DEFAULT_BATCH = 1_000;
 
 /**
  * Seconds between polls of the bids being held — the pace when the auction is
