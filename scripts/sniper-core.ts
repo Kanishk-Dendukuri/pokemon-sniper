@@ -1047,15 +1047,10 @@ const DEFAULT_MAX_CARDS = 0;
  * while the job runs anyway. 400 is a minute or so of lookups at the measured
  * rate, and at the survival rates seen — four in five at the top of the list,
  * fewer further down — its survivors fit one or two jobs under the 200-cert
- * cap. Near the close the round shrinks to EXTENDED_BATCH.
+ * cap. It is the same size near the close as far from it: the bids are
+ * watched on their own clock, not the round's.
  */
 const DEFAULT_BATCH = 400;
-
-/**
- * Inside this long to the close, a round is shortened to EXTENDED_BATCH so the
- * bids are looked at between rounds rather than only at their ends.
- */
-const NEAR_CLOSE_S = 1_200;
 
 /**
  * Seconds between polls of the bids being held — the pace when the auction is
@@ -1076,13 +1071,7 @@ const POLL_NEAR_DIVISOR = 2;
  */
 const POLL_EXTENDED_DIVISOR = 4;
 
-/**
- * If a batch does have to be priced near the close or during extended bidding,
- * keep it short: pricing means waiting on Card Uploader to resolve a batch of
- * certs, which can take minutes, and those are minutes the bids are not being
- * watched.
- */
-const EXTENDED_BATCH = 50;
+
 
 /**
  * Card Uploader's bearer is renewed by loading its dashboard again. When the
@@ -2131,7 +2120,16 @@ export async function refreshCuToken(session: CuSession) {
 export async function priceByCert(
   session: CuSession,
   candidates: Candidate[],
-  opts: { prices: Map<string, CuPrice>; concurrency: number; sweep: boolean },
+  opts: {
+    prices: Map<string, CuPrice>; concurrency: number; sweep: boolean;
+    /**
+     * A look at the bids, taken between certs. Rate-limited by the caller, so
+     * calling it often costs nothing: it is what keeps the poll on its own
+     * clock rather than the round's, and is why a round near the close no
+     * longer has to be cut short to keep the bids watched.
+     */
+    between?: () => Promise<void>;
+  },
 ): Promise<Map<string, CuPrice>> {
   const prices = opts.prices;
 
@@ -2196,6 +2194,9 @@ export async function priceByCert(
 
         done++;
         if (done % 500 === 0) console.log(`    priced ${done}/${total}`);
+        // One worker's turn at the bids. The caller's own clock decides
+        // whether this does anything, so every worker may ask.
+        if (opts.between) await opts.between();
       }
     };
     await Promise.all(Array.from({ length: concurrency }, worker));
@@ -3085,7 +3086,7 @@ export async function runSniper(venue: Venue): Promise<void> {
 
       if (cu) {
         await refreshCuToken(cu);
-        await priceByCert(cu, batch, { prices, concurrency, sweep });
+        await priceByCert(cu, batch, { prices, concurrency, sweep, between: live ? pollBetween : undefined });
       }
 
       let passed: Row[] = [];
@@ -3225,10 +3226,15 @@ export async function runSniper(venue: Venue): Promise<void> {
     /** What the book may act on: every priced lot a re-scan has not already found past the max. */
     const pool = () => bidding.filter((row) => !pricedOutBy.has(row.listing_id)).map((row) => toBiddable(row)!);
 
-    /** The next slice of the list, shorter when the close is near so the bids are looked at between them. */
+    /**
+     * The next slice of the list. One size, near the close or far from it:
+     * the bids are watched on their own clock now (priceByCert's `between`),
+     * so cutting the round short bought nothing but a slower list. It used to
+     * shrink to fifty inside twenty minutes of the open, which on 2026-09-20
+     * was 200 certs priced in six minutes against 8,976 to get through.
+     */
     const nextBatch = (): Candidate[] => {
-      const size = secondsToClose() <= NEAR_CLOSE_S ? Math.min(batchSize, EXTENDED_BATCH) : batchSize;
-      const batch = candidates.slice(cursor, cursor + size);
+      const batch = candidates.slice(cursor, cursor + batchSize);
       cursor += batch.length;
       return batch;
     };
