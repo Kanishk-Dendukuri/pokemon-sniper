@@ -79,6 +79,47 @@ a box to say it outright. A run with both blank says so in its header and bids
 nothing. `DEFAULT_TIERS` is still the table these were fitted as, and what the
 Fanatics and Alt dispatch forms are pre-filled with.
 
+**A CGC 10 can be priced as two cards.** CGC grades a 10 as either Gem Mint or
+Pristine — one number on the label, two prices in the market. Cut the CGC box
+into sections on `|`, each opening with a label, and each gets its own table:
+
+```
+grades 10, pristine: $1-100: 75% of lowest | gem mint: $1-100: 70% of lowest
+```
+
+A section with no label is the grader's own and prices everything the labelled
+ones do not: every grade under 10, and either label the box did not name. A box
+of nothing but labelled sections leaves the grader's own column off, so a CGC
+9.5 is never quietly priced off the Pristine table. A box with no sections at
+all is what every table was before this and still prices both labels alike.
+
+Which of the two a lot is comes from whoever would know, in order: the cert —
+the identified card's grade wording, then the free lookup's condition — then the
+house, where its catalogue says so outright (Alt's grade key does, Fanatics'
+index does not), and the listing title last. A CGC 10 that none of them labels
+is refused by a table that splits the two and priced like any other CGC 10 by a
+table that does not. The label lands in the bid list as `grade_label`.
+
+**`--bid-order` says which pools the fire fills first.** Rungs of
+`<column> $<from>-<to>`, filled in the order written:
+
+```
+PSA $1-100, CGC $1-100, PSA $100-500, CGC Pristine $100-500
+```
+
+The columns are `PSA`, `CGC`, `CGC Pristine` and `CGC Gem Mint`, and `CGC`
+covers all three of its own. A rung with no band covers that column's whole
+table. Every lot lands on the first rung that holds both its column and its
+price, and a lot no rung holds is bid last rather than not at all — stopping a
+run bidding is the tier table's job, and it says so out loud. Inside a rung the
+full arts go first and then the cheapest, which is the order every run used
+before this and still uses when no bid order is given.
+
+A rung whose column has no band at that price can never fire: `CGC $100-500`
+does nothing on a CGC table that stops at $100. The header prints both the
+tables and the bid order, so the two can be read against each other before the
+scan starts.
+
 `--budget` is a ceiling on what the run may hold at once, all-in — $10,000
 unless told — and not a target: how many lots are won is the tier table's
 and the per-card cap's doing.

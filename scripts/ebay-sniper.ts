@@ -154,6 +154,8 @@ import {
   setMaxCopiesPerCard,
   setSalesRule,
   setTierTable,
+  setBidOrder,
+  bidOrderFrom,
   sleep,
   snapshotFailure,
   tierTable,
@@ -735,6 +737,7 @@ export async function runEbaySniper(): Promise<void> {
   // tables are read first and the ranges come out of them.
   setTierTable(tiersFromArgs(process.env, DEFAULT_GRADE_RANGES));
   requireSomethingToBidOn(live);
+  setBidOrder(bidOrderFrom());
   const grades = gradeRanges();
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setSalesRule(salesRuleFromArgs());

@@ -327,7 +327,7 @@ describe("market value", () => {
 describe("the CSV", () => {
   test("carries only the columns worth reading, in order", () => {
     expect(CSV_COLUMNS).toEqual([
-      "url", "title", "auction", "lot", "language", "grader", "grade", "cert",
+      "url", "title", "auction", "lot", "language", "grader", "grade", "grade_label", "cert",
       "market_price", "sales_median", "priced_by", "tier_rule", "max_bid_hammer", "max_bid_all_in",
       "bid_placed", "bid_status", "final_bid", "final_paid_all_in", "market_pct",
       "unawardable",
@@ -340,11 +340,11 @@ describe("the CSV", () => {
       language: "English", grader: "PSA", grade: "10", cert: "123", market_price: 60, sales_median: 70, tier_rule: "65% all-in",
       max_bid_hammer: 32, max_bid_all_in: 39, bid_placed: 32, bid_status: "won", final_bid: 30, final_paid_all_in: 36, market_pct: 51.4,
       unawardable: "",
-      listing_id: "x", priority: 0, current_bid: 30, bid_count: 4, headroom: 2, card_key: "secret", bid_rank: "", flags: "", reason: "internal",
+      listing_id: "x", priority: 0, bid_group: 0, grade_label: "", current_bid: 30, bid_count: 4, headroom: 2, card_key: "secret", bid_rank: "", flags: "", reason: "internal",
     } satisfies Row;
     const [header, line] = toCsv([row]).trim().split("\n");
     expect(header).toBe(CSV_COLUMNS.join(","));
-    expect(line).toBe('https://www.fanaticscollect.com/weekly/x,"Pikachu, ""the"" one",WA242,WA242 Lot: 1,English,PSA,10,123,60,70,,65% all-in,32,39,32,won,30,36,51.4,');
+    expect(line).toBe('https://www.fanaticscollect.com/weekly/x,"Pikachu, ""the"" one",WA242,WA242 Lot: 1,English,PSA,10,,123,60,70,,65% all-in,32,39,32,won,30,36,51.4,');
     expect(line).not.toContain("secret");
     expect(line).not.toContain("internal");
   });

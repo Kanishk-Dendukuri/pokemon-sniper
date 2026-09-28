@@ -135,7 +135,24 @@
  *                         the same, for a workflow input. There is no default
  *                         table: a grader given none is not bid on at all,
  *                         and a live run given none for either grader is
- *                         refused before it scans anything
+ *                         refused before it scans anything. A CGC table may
+ *                         price a 10 Pristine apart from a 10 Gem Mint: cut
+ *                         the box into sections on "|", each opening with a
+ *                         label — "pristine: $1-100: 75% of lowest | gem
+ *                         mint: $1-100: 70% of lowest". A section with no
+ *                         label is the grader's own and covers every grade
+ *                         and label the labelled ones do not (see
+ *                         readSections)
+ *   --bid-order=…         which pools the fire fills first, as rungs of
+ *                         "<column> $<from>-<to>": "PSA $1-100, CGC $1-100,
+ *                         PSA $100-500, CGC Pristine $100-500". The columns
+ *                         are PSA, CGC, CGC Pristine and CGC Gem Mint, and
+ *                         "CGC" covers all three of its own. A rung with no
+ *                         band covers that column's whole table; a lot no
+ *                         rung holds is bid last rather than not at all. The
+ *                         BID_ORDER environment variable does the same
+ *                         (default: the cheapest lot first inside the full
+ *                         arts, which is how every run bid before this)
  *   --psa-grades=1-10     the grades to scan, per grader, and --cgc-grades=…
  *                         for CGC; PSA_GRADES / CGC_GRADES do the same. The
  *                         tier box's "grades 1-10" is the usual way in
@@ -282,6 +299,34 @@ export {
 export const GRADERS = ["PSA", "CGC"] as const;
 export type Grader = (typeof GRADERS)[number];
 
+/**
+ * The two things a CGC 10 can be.
+ *
+ * CGC grades a 10 as either Gem Mint or Pristine — the same number on the
+ * label, two different cards to the market, and often a wide gap in what they
+ * sell for. Everything below 10 has no label, so this is a CGC 10's business
+ * and nobody else's.
+ */
+export const GRADE_LABELS = ["Pristine", "Gem Mint"] as const;
+export type GradeLabel = (typeof GRADE_LABELS)[number];
+
+/**
+ * A column of the tier table: a grader, or — for CGC only — a grader and one
+ * of the 10 labels.
+ *
+ * A table that names no label has one CGC column and prices a Pristine 10 and
+ * a Gem Mint 10 the same, which is what every table written before this did
+ * and still does. A table that names one gets a column of its own for it, and
+ * the bare "CGC" column is what everything it did not name falls back to.
+ */
+export const TIER_KEYS = ["PSA", "CGC", "CGC Pristine", "CGC Gem Mint"] as const;
+export type TierKey = (typeof TIER_KEYS)[number];
+
+/** The tier-table column for a CGC 10 of this label: "CGC Pristine", "CGC Gem Mint". */
+export function labelKey(label: GradeLabel): TierKey {
+  return `CGC ${label}` as TierKey;
+}
+
 
 /**
  * Every grade a slab can carry, low to high. It ran 7–10 until 2026-09-20,
@@ -422,7 +467,16 @@ export type TierBand = {
   fallback?: Fallback;
 };
 export type GraderTiers = { floor: number; bands: TierBand[] };
-export type TierTable = Record<Grader, GraderTiers>;
+
+/**
+ * The tables a run bids by, a column each.
+ *
+ * Both graders always have a column, so every caller that knows only a grader
+ * still has a table to read. The two CGC 10 label columns are optional: absent
+ * is the normal case and means a CGC 10 is priced off the bare CGC column
+ * whichever label it carries.
+ */
+export type TierTable = Record<Grader, GraderTiers> & Partial<Record<TierKey, GraderTiers>>;
 
 export const DEFAULT_TIERS: TierTable = {
   CGC: { floor: 7.5, bands: [
@@ -452,7 +506,7 @@ export const TIERS_OFF: GraderTiers = { floor: Infinity, bands: [] };
  * box left empty, so it is said out loud rather than left to a table line.
  */
 export function nothingToBidOn(table: TierTable = tierTable()): string | null {
-  const off = GRADERS.filter((g) => table[g].bands.length === 0);
+  const off = GRADERS.filter((g) => graderOff(g, table));
   if (off.length < GRADERS.length) return null;
   return `every grader is switched off (${off.join(", ")}), so this run will not bid on anything.` +
     ` Give it a tier table — --tiers-psa="$10-90: 85%, $90-450: 80%" or the same box in the workflow.`;
@@ -472,9 +526,153 @@ export function requireSomethingToBidOn(live: boolean, table: TierTable = tierTa
   if (live && nothing) throw new Error(`refusing a live run: ${nothing}`);
 }
 
-/** Whether this grader is switched off for the run. */
+/**
+ * Whether this grader is switched off for the run.
+ *
+ * A CGC table written as label columns only — Pristine and Gem Mint, no bare
+ * CGC — is not CGC switched off: it bids on CGC 10s and nothing else. So every
+ * column the grader owns is asked, not just its own.
+ */
 export function graderOff(grader: Grader, table: TierTable = tierTable()): boolean {
-  return table[grader].bands.length === 0;
+  return columnsOf(grader).every((key) => (table[key]?.bands.length ?? 0) === 0);
+}
+
+/** Every tier-table column this grader can be priced from, its own first. */
+export function columnsOf(grader: Grader): TierKey[] {
+  return grader === "CGC" ? ["CGC", "CGC Pristine", "CGC Gem Mint"] : [grader];
+}
+
+/** One column of the table. A label column the table does not have reads as off. */
+export function columnOf(key: TierKey, table: TierTable = tierTable()): GraderTiers {
+  return table[key] ?? TIERS_OFF;
+}
+
+/**
+ * Whether this table prices the two CGC 10 labels apart.
+ *
+ * Only then does a CGC 10 have to be known as one or the other. When it does
+ * not, the label is never asked for and a lot whose label nothing states is
+ * priced like any other CGC 10.
+ */
+export function splitsCgcLabels(table: TierTable = tierTable()): boolean {
+  return GRADE_LABELS.some((label) => table[labelKey(label)] !== undefined);
+}
+
+/**
+ * The column a lot is priced from: the label's own where the table has one,
+ * else the grader's.
+ *
+ * Null means the table splits the labels and this lot's label is not known —
+ * a CGC 10 nobody has said is Pristine or Gem Mint. The caller refuses it
+ * rather than guess, because guessing is a bid at the other label's price and
+ * the whole point of splitting them is that those are not the same number.
+ */
+export function tierKeyFor(
+  grader: Grader,
+  grade: number | undefined,
+  label: GradeLabel | null,
+  table: TierTable = tierTable(),
+): TierKey | null {
+  if (grader !== "CGC") return grader;
+  if (grade !== 10) return "CGC";
+  if (label !== null) return table[labelKey(label)] ? labelKey(label) : "CGC";
+  return splitsCgcLabels(table) ? null : "CGC";
+}
+
+/**
+ * One rung of the bid order: the columns it covers and the price band it
+ * covers them over.
+ */
+export type BidGroup = { keys: TierKey[]; from: number; to: number; text: string };
+
+/**
+ * The order the bids go on in, as rungs of (column × price band).
+ *
+ * The fire has a budget and an ordering, and until now the ordering was the
+ * cheapest lot first inside the full arts. That spends the purse on whatever
+ * happens to be cheap. A bid order says which pools to fill first instead:
+ *
+ *     PSA $1-100, CGC $1-100, PSA $100-500, CGC Pristine $100-500
+ *
+ * Every lot lands on the first rung whose column and price band both hold it,
+ * and the rungs are filled in the order written. A lot no rung holds goes last
+ * rather than nowhere, so a bid order can never quietly stop a run bidding —
+ * that is the tier table's job and it says so out loud.
+ *
+ * An empty bid order is one rung holding everything, which is the ordering
+ * every run had before this and still has unless it asks for another.
+ */
+export type BidOrder = BidGroup[];
+
+const KEY_WORDS: [RegExp, TierKey[]][] = [
+  [/^psa$/i, ["PSA"]],
+  [/^cgc[ -]?pristine$/i, ["CGC Pristine"]],
+  [/^cgc[ -]?gem[ -]?m(?:in)?t$/i, ["CGC Gem Mint"]],
+  [/^cgc$/i, ["CGC", "CGC Pristine", "CGC Gem Mint"]],
+];
+
+/**
+ * A bid order from the words for it: "PSA $1-100, CGC $1-100, PSA $100-500".
+ *
+ * A rung with no price band covers that column's whole table. "CGC" with no
+ * label covers all three CGC columns, so a bid order written before a table
+ * was split still means what it said.
+ */
+export function parseBidOrder(text: string): BidOrder {
+  const out: BidOrder = [];
+  for (const piece of text.split(/[,;|]/).map((p) => p.trim()).filter(Boolean)) {
+    const m = /^(.*?)(?:\s*\$?\s*([\d.]+)\s*[-–—]\s*\$?\s*([\d.]+))?$/.exec(piece);
+    const name = (m?.[1] ?? "").trim();
+    const found = KEY_WORDS.find(([re]) => re.test(name));
+    if (!found) {
+      throw new Error(`cannot read "${piece}" in the bid order:` +
+        ` want a column — "PSA", "CGC", "CGC Pristine", "CGC Gem Mint" — and optionally a band, "PSA $1-100"`);
+    }
+    const from = m?.[2] === undefined ? 0 : Number(m[2]);
+    const to = m?.[3] === undefined ? Infinity : Number(m[3]);
+    if (!(to > from)) throw new Error(`the bid-order rung "${piece}" does not run upward`);
+    out.push({ keys: found[1], from, to, text: piece });
+  }
+  if (out.length === 0) throw new Error(`a bid order needs at least one rung, got "${text}"`);
+  return out;
+}
+
+/** A bid order as one line, the way parseBidOrder() reads it back. */
+export function formatBidOrder(order: BidOrder = bidOrder()): string {
+  return order.length === 0 ? "cheapest first (no bid order given)" : order.map((g) => g.text).join(", ");
+}
+
+/**
+ * Which rung a lot sits on: the first that holds both its column and its
+ * price. Past the last rung for anything no rung holds, so an unmatched lot is
+ * bid last rather than not at all.
+ */
+export function bidGroupOf(key: TierKey, price: number, order: BidOrder = bidOrder()): number {
+  const found = order.findIndex((g) => g.keys.includes(key) && price >= g.from && price <= g.to);
+  return found === -1 ? order.length : found;
+}
+
+/** The bid order a run was given: --bid-order=…, else BID_ORDER, else none. */
+export function bidOrderFrom(env: Record<string, string | undefined> = process.env): BidOrder {
+  const text = opt("bid-order", env.BID_ORDER ?? "").trim();
+  if (!text || /^(?:none|off|no)$/i.test(text)) return [];
+  try {
+    return parseBidOrder(text);
+  } catch (err) {
+    throw new Error(`the bid order could not be read: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+let activeBidOrder: BidOrder = [];
+
+/** The bid order this run fires in. */
+export function bidOrder(): BidOrder {
+  return activeBidOrder;
+}
+
+/** Fire in this order from now on — what --bid-order does. */
+export function setBidOrder(order: BidOrder): void {
+  activeBidOrder = order;
 }
 
 let activeTiers: TierTable = { CGC: TIERS_OFF, PSA: TIERS_OFF };
@@ -705,8 +903,8 @@ export function tiersFromArgs(
     // scanned at something other than the default. It rides in the tier box
     // because a dispatch form takes ten inputs and this is the grader's own
     // line already.
-    const withGrades = /^grades?\s+([^,;]+)\s*[,;]\s*([\s\S]+)$/i.exec(text.trim());
-    const onlyGrades = /^grades?\s+([^,;]+)$/i.exec(text.trim());
+    const withGrades = /^grades?\s+([^,;|]+)\s*[,;|]\s*([\s\S]+)$/i.exec(text.trim());
+    const onlyGrades = /^grades?\s+([^,;|]+)$/i.exec(text.trim());
     const rest = withGrades ? withGrades[2].trim() : onlyGrades ? "" : text;
     const gradeText = withGrades?.[1] ?? onlyGrades?.[1];
     if (gradeText !== undefined) {
@@ -723,13 +921,66 @@ export function tiersFromArgs(
       continue;
     }
     try {
-      table[grader] = parseTiers(rest);
+      for (const [key, tiers] of readSections(grader, rest)) table[key] = tiers;
     } catch (err) {
       throw new Error(`the ${grader} tier table could not be read: ${err instanceof Error ? err.message : err}`);
     }
   }
   setGradeRanges(ranges);
   return table;
+}
+
+/** "pristine", "gem mint", "gemmint", "gem-mint" — a section's label, or null. */
+function readLabel(text: string): GradeLabel | null {
+  const t = text.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+  if (/^pristine(?: 10)?$/.test(t)) return "Pristine";
+  if (/^(?:gem ?mint|gem ?mt|gem)(?: 10)?$/.test(t)) return "Gem Mint";
+  return null;
+}
+
+/**
+ * A tier box cut into its columns.
+ *
+ * One table is the ordinary box and fills the grader's own column. A CGC box
+ * may instead carry two or three sections separated by "|", each optionally
+ * opening with a CGC 10 label:
+ *
+ *     $1-100: 70% of lowest | pristine: $1-100: 75% of lowest
+ *
+ * The section with no label is the grader's own column and prices everything
+ * the labelled ones do not — every grade under 10, and either label the box
+ * did not name. A box of labelled sections only leaves the grader's own column
+ * off, which is a CGC 10-only run said another way.
+ */
+export function readSections(grader: Grader, text: string): [TierKey, GraderTiers][] {
+  const sections = text.split("|").map((part) => part.trim()).filter(Boolean);
+  if (sections.length === 0) throw new Error(`a tier table needs at least one band, got "${text}"`);
+  const out: [TierKey, GraderTiers][] = [];
+  const seen = new Set<TierKey>();
+  let bare = false;
+
+  for (const section of sections) {
+    const split = /^([A-Za-z][A-Za-z \-_]*?)\s*:\s*([\s\S]+)$/.exec(section);
+    const label = split ? readLabel(split[1]) : null;
+    if (split && label === null) {
+      throw new Error(`cannot read "${split[1].trim()}" as a section — want "pristine" or "gem mint"`);
+    }
+    if (label !== null && grader !== "CGC") {
+      throw new Error(`"${label}" is a CGC 10 label, and this is the ${grader} table`);
+    }
+    const key: TierKey = label === null ? grader : labelKey(label);
+    if (seen.has(key)) throw new Error(`"${key}" is given twice`);
+    seen.add(key);
+    if (label === null) bare = true;
+    const body = label === null ? section : split![2].trim();
+    if (/^(?:none|off|no|skip)$/i.test(body)) { out.push([key, TIERS_OFF]); continue; }
+    out.push([key, parseTiers(body)]);
+  }
+
+  // A box of nothing but labelled sections switches the grader's own column
+  // off, so a CGC 9.5 is not quietly priced off the Pristine table.
+  if (!bare && grader === "CGC") out.push(["CGC", TIERS_OFF]);
+  return out;
 }
 
 /**
@@ -1276,6 +1527,36 @@ export function isPristine(lot: Graded): boolean {
   return lot.pristine ?? /\bpristine\b/i.test(lot.title);
 }
 
+const SAYS_PRISTINE = /\bpristine\b/i;
+const SAYS_GEM_MINT = /\bgem\s*-?\s*m(?:in)?t\b/i;
+
+/**
+ * Which of the two a CGC 10 is, or null when nothing on hand says.
+ *
+ * Asked in order of who would know. The cert is the authority and is read
+ * first, from the identified card's grade wording and then from the free
+ * lookup's condition; the house is next, where its catalogue states the label
+ * outright — Alt's grade key does, Fanatics' index does not; the listing title
+ * is last, because a title is written by whoever listed the lot.
+ *
+ * Null is a real answer and not a failure: a Fanatics CGC 10 whose title says
+ * neither word is a slab nobody has labelled yet. A table that prices the two
+ * apart refuses it; a table that does not never asks.
+ */
+export function cgcLabel(
+  lot: Graded,
+  cert?: { gradeText?: string; condition?: string } | null,
+): GradeLabel | null {
+  if (lot.gradingService !== "CGC" || lot.grade !== 10) return null;
+  const said = `${cert?.gradeText ?? ""} ${cert?.condition ?? ""}`;
+  if (SAYS_PRISTINE.test(said)) return "Pristine";
+  if (SAYS_GEM_MINT.test(said)) return "Gem Mint";
+  if (lot.pristine !== undefined) return lot.pristine ? "Pristine" : "Gem Mint";
+  if (SAYS_PRISTINE.test(lot.title)) return "Pristine";
+  if (SAYS_GEM_MINT.test(lot.title)) return "Gem Mint";
+  return null;
+}
+
 /**
  * Master Ball reverse holos are chased in one condition only: PSA 10, or a
  * CGC 10 that is Pristine rather than Gem Mint. Everything else on the chase
@@ -1343,8 +1624,8 @@ export function cardKey(parts: { cardName: string; setName: string; cardNumber: 
 // ── Bid maths ─────────────────────────────────────────────────────────────────
 
 /** The band a card worth `price` falls in at this grader, or null outside the table. */
-export function bandFor(grader: Grader, price: number, table: TierTable = tierTable()): TierBand | null {
-  const { floor, bands } = table[grader];
+export function bandFor(key: TierKey, price: number, table: TierTable = tierTable()): TierBand | null {
+  const { floor, bands } = columnOf(key, table);
   if (!(price >= floor)) return null;
   for (const [i, band] of bands.entries()) {
     // "$90–450" reads as inclusive at the top; every other boundary is the
@@ -1356,25 +1637,25 @@ export function bandFor(grader: Grader, price: number, table: TierTable = tierTa
 }
 
 /** The rule for a card worth `price` at this grader, or null outside the table. */
-export function tierFor(grader: Grader, price: number, table: TierTable = tierTable()): BidRule | null {
-  return bandFor(grader, price, table)?.rule ?? null;
+export function tierFor(key: TierKey, price: number, table: TierTable = tierTable()): BidRule | null {
+  return bandFor(key, price, table)?.rule ?? null;
 }
 
 /** A band as the table writes it — "$30-100" — for a reason that has to name one. */
-export function bandLabel(grader: Grader, band: TierBand, table: TierTable = tierTable()): string {
-  const { floor, bands } = table[grader];
+export function bandLabel(key: TierKey, band: TierBand, table: TierTable = tierTable()): string {
+  const { floor, bands } = columnOf(key, table);
   const i = bands.indexOf(band);
   return `$${i <= 0 ? floor : bands[i - 1].upTo}-${band.upTo}`;
 }
 
 /** The least a card can be worth and still be bid on at this grader. */
-export function tierFloor(grader: Grader, table: TierTable = tierTable()): number {
-  return table[grader].floor;
+export function tierFloor(key: TierKey, table: TierTable = tierTable()): number {
+  return columnOf(key, table).floor;
 }
 
 /** The most a card can be worth and still be bid on at this grader. */
-export function tierCeiling(grader: Grader, table: TierTable = tierTable()): number {
-  const { bands } = table[grader];
+export function tierCeiling(key: TierKey, table: TierTable = tierTable()): number {
+  const { bands } = columnOf(key, table);
   return bands.length === 0 ? 0 : bands[bands.length - 1].upTo;
 }
 
@@ -1439,11 +1720,11 @@ export function applyRule(
  * and quoteBand() is the way in for that.
  */
 export function maxBid(
-  grader: Grader,
+  key: TierKey,
   price: number,
   table: TierTable = tierTable(),
 ): { rule: string; share: number | null; allIn: number; hammer: number } | null {
-  const band = bandFor(grader, price, table);
+  const band = bandFor(key, price, table);
   return band ? applyRule(band.rule, price, band.round ?? "down") : null;
 }
 
@@ -1495,10 +1776,10 @@ export function selectionRule(tiers: GraderTiers, run: SalesRule = salesRule()):
  * but so a band with a fallback still gets its turn. Only when there is
  * neither is the lot done with here.
  */
-export function bandBasis(grader: Grader, ev: PriceEvidence, table: TierTable = tierTable()):
+export function bandBasis(key: TierKey, ev: PriceEvidence, table: TierTable = tierTable()):
   | { price: number; median: number | null; via: string }
   | { price: null; median: number | null; reason: string } {
-  const rule = selectionRule(table[grader]);
+  const rule = selectionRule(columnOf(key, table));
   const gate = salesGate(ev.sales, ev.now, rule);
   const used = pricesFrom(ev, salesIn(ev.sales, rule, ev.now));
   const median = used.length === 0 ? null : applyBasis({ kind: "median" }, used);
@@ -1522,18 +1803,18 @@ export type Quoted = { price: number; via: string; rule: string; share: number |
  * off evidence the band said it needed and did not get is a bid at a made-up
  * number.
  */
-export function quoteBand(grader: Grader, price: number, ev: PriceEvidence, table: TierTable = tierTable()):
+export function quoteBand(key: TierKey, price: number, ev: PriceEvidence, table: TierTable = tierTable()):
   { ok: true; quote: Quoted } | { ok: false; reason: string } {
-  const band = bandFor(grader, price, table);
+  const band = bandFor(key, price, table);
   if (!band) {
     return {
       ok: false,
-      reason: price < tierFloor(grader, table)
-        ? `market price $${price} is under the $${tierFloor(grader, table)} ${grader} floor`
-        : `market price $${price} is above the $${tierCeiling(grader, table)} ${grader} tier ceiling`,
+      reason: price < tierFloor(key, table)
+        ? `market price $${price} is under the $${tierFloor(key, table)} ${key} floor`
+        : `market price $${price} is above the $${tierCeiling(key, table)} ${key} tier ceiling`,
     };
   }
-  const label = bandLabel(grader, band, table);
+  const label = bandLabel(key, band, table);
   const alt = ev.altValue !== null && ev.altValue > 0 ? ev.altValue : null;
   let rule = band.rule;
   let worked: number;
@@ -2459,6 +2740,14 @@ export type Row = {
 
   listing_id: string;
   priority: number;
+  /**
+   * The bid-order rung this lot sits on, filled in once its price is known.
+   * Zero for every lot when no bid order was given, which is one rung holding
+   * everything. Past the last rung for a lot no rung holds.
+   */
+  bid_group: number;
+  /** "Pristine" / "Gem Mint" for a CGC 10 the cert or the house has labelled. */
+  grade_label: string;
   current_bid: number;
   bid_count: number;
   headroom: number | "";
@@ -2470,7 +2759,7 @@ export type Row = {
 
 /** The columns of the bid list CSV, in order. */
 export const CSV_COLUMNS: (keyof Row)[] = [
-  "url", "title", "auction", "lot", "language", "grader", "grade", "cert",
+  "url", "title", "auction", "lot", "language", "grader", "grade", "grade_label", "cert",
   "market_price", "sales_median", "priced_by", "tier_rule", "max_bid_hammer", "max_bid_all_in",
   "bid_placed", "bid_status", "final_bid", "final_paid_all_in", "market_pct",
   "unawardable",
@@ -2490,6 +2779,9 @@ export function baseRow(c: Candidate): Row {
     bid_placed: "", bid_status: "", final_bid: "", final_paid_all_in: "", market_pct: "", unawardable: "",
     listing_id: c.listingId,
     priority: priorityRank({ grade: c.grade, gradingService: c.grader, title: c.title, pristine: c.pristine }),
+    // Filled in by evaluate(), which is where the price that picks the rung is.
+    bid_group: 0,
+    grade_label: "",
     current_bid: c.currentBid,
     bid_count: c.bidCount,
     headroom: "", card_key: "", bid_rank: "", flags: "", reason: "",
@@ -2550,7 +2842,23 @@ export function evaluate(c: Candidate, price: CuPrice | undefined, now: Date): {
 
   // What the card is worth, for picking the band. The band it lands in then
   // prices it again its own way, which is what the bid is worked from.
-  const basis = bandBasis(c.grader, evidence);
+  // Which of the two a CGC 10 is, and so which column prices it. The cert is
+  // asked first and the title last; see cgcLabel(). A table that does not price
+  // the labels apart never needs the answer, and a lot with no answer is only
+  // refused by a table that does.
+  const label = cgcLabel(
+    { grade: c.grade, gradingService: c.grader, title: c.title, pristine: c.pristine },
+    { gradeText: price.card?.gradeText, condition: price.info?.condition },
+  );
+  row.grade_label = label ?? "";
+  const key = tierKeyFor(c.grader, c.grade, label);
+  if (key === null) {
+    row.reason = "CGC 10 with no Pristine / Gem Mint label on the cert, the catalogue or the title," +
+      " and this table prices the two apart";
+    return { row, worthy: false };
+  }
+
+  const basis = bandBasis(key, evidence);
   row.sales_median = basis.median ?? "";
   if (basis.price === null) { row.reason = basis.reason; return { row, worthy: false }; }
   row.market_price = basis.price;
@@ -2565,7 +2873,7 @@ export function evaluate(c: Candidate, price: CuPrice | undefined, now: Date): {
     return { row, worthy: false };
   }
 
-  const quoted = quoteBand(c.grader, basis.price, evidence);
+  const quoted = quoteBand(key, basis.price, evidence);
   if (!quoted.ok) { row.reason = quoted.reason; return { row, worthy: false }; }
   const bid = quoted.quote;
   row.market_price = bid.price;
@@ -2584,6 +2892,9 @@ export function evaluate(c: Candidate, price: CuPrice | undefined, now: Date): {
   row.max_bid_all_in = bid.allIn;
   row.max_bid_hammer = bid.hammer;
   row.headroom = bid.hammer - c.currentBid;
+  // The rung the fire meets this lot on. Worked from the band's own price,
+  // which is the figure the bid is made of, not the one that picked the band.
+  row.bid_group = bidGroupOf(key, bid.price);
 
   if (bid.hammer <= c.currentBid) {
     row.reason = `current bid $${c.currentBid} is already at or above max hammer $${bid.hammer}`;
@@ -2631,6 +2942,21 @@ export function toCsv(rows: Row[]): string {
  * identified has no card key for that count, so it is dropped here: an
  * unchecked cap is the thing the cap exists to prevent.
  */
+/**
+ * The order the fire meets the lots in.
+ *
+ * The bid-order rung first, where a run was given one: that is the whole point
+ * of it, and it has to beat every other consideration or it is only a hint.
+ * Then the card priority — the full arts ahead of the rest — and then the
+ * cheapest, so a rung is filled with as many of its lots as the purse reaches
+ * rather than one big one.
+ */
+export function byBidOrder(a: Row, b: Row): number {
+  return a.bid_group - b.bid_group
+    || a.priority - b.priority
+    || Number(a.max_bid_all_in) - Number(b.max_bid_all_in);
+}
+
 export function finalCut(passed: Row[]): { worthy: Row[]; dropped: Row[]; flaggedOut: number } {
   const worthy: Row[] = [];
   const dropped: Row[] = [];
@@ -2957,6 +3283,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   // a run that should not start.
   setTierTable(tiersFromArgs());
   requireSomethingToBidOn(live);
+  setBidOrder(bidOrderFrom());
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setGraderCopyCaps(graderCopyCapsFromArgs());
   setSourcingCheck(sourcingCheckFromArgs());
@@ -2989,8 +3316,16 @@ export async function runSniper(venue: Venue): Promise<void> {
   console.log(`    batch        ${batchSize} cert(s) priced per round, ${concurrency} at a time; every candidate is priced`);
   for (const grader of GRADERS) {
     const purse = perGraderCents[grader];
-    console.log(`    tiers ${grader}    ${formatTiers(tierTable()[grader])}${purse === undefined ? "" : ` — at most ${dollars(purse)} of the ceiling`}`);
+    // Every column this table has, so a CGC box split into Pristine and Gem
+    // Mint is read back as two lines rather than one that hides half of it.
+    for (const key of columnsOf(grader)) {
+      const column = tierTable()[key];
+      if (!column || (key !== grader && column.bands.length === 0)) continue;
+      console.log(`    tiers ${key.padEnd(8)} ${formatTiers(column)}` +
+        (key === grader && purse !== undefined ? ` — at most ${dollars(purse)} of the ceiling` : ""));
+    }
   }
+  console.log(`    bid order    ${formatBidOrder()}`);
   const noTable = nothingToBidOn();
   if (noTable) console.log(`    ⚠️  ${noTable}`);
   const graderCaps = Object.entries(cardCaps().perCardByGrader ?? {});
@@ -3187,9 +3522,9 @@ export async function runSniper(venue: Venue): Promise<void> {
         }
       }
 
-      // Card priority order first — PSA 10 down to 7, then CGC Pristine, Gem
-      // Mint, 9.5 down to 7 — and the most headroom inside it.
-      passed.sort((a, b) => a.priority - b.priority || Number(a.max_bid_all_in) - Number(b.max_bid_all_in));
+      // Bid order first, where the run was given one; then the full arts, then
+      // the cheapest inside that. See byBidOrder().
+      passed.sort(byBidOrder);
       const cut = finalCut(passed);
       rejected.push(...cut.dropped);
       flaggedOut += cut.flaggedOut;
@@ -3204,7 +3539,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       // best of what is known rather than the first thing found. A plan bids
       // (on paper) as it goes; a live run holds everything for the fire, and
       // only a round priced after it hands its lots to the watch below.
-      bidding.sort((a, b) => a.priority - b.priority || Number(a.max_bid_all_in) - Number(b.max_bid_all_in));
+      bidding.sort(byBidOrder);
       if (!live || fired) {
         const filled = await book.fill(pool());
         if (filled.auctionClosed) auctionClosed = true;
@@ -3331,7 +3666,7 @@ export async function runSniper(venue: Venue): Promise<void> {
      * had found past the max, for the funnel.
      */
     const writeOutputs = (final: boolean): number => {
-      worthy.sort((a, b) => a.priority - b.priority || Number(a.max_bid_all_in) - Number(b.max_bid_all_in));
+      worthy.sort(byBidOrder);
       const placedBy = new Map(book.placed.map((b) => [b.listingId, b]));
       const inheritedBy = new Map(book.inherited.map((b) => [b.listingId, b]));
       const skippedBy = new Map(book.skipped.map((s) => [s.listingId, s]));

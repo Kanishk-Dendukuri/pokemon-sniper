@@ -154,7 +154,11 @@ on:
         type: string
         default: ""
       cgc_tiers:
-        description: 'CGC tier table, the same way. LEAVE BLANK AND NO CGC LOT IS BID ON'
+        description: 'CGC tier table, the same way. May price a CGC 10 Pristine apart from a Gem Mint: sections split on "|", each opening with a label — "pristine: $1-100: 75% of lowest | gem mint: $1-100: 70% of lowest". A section with no label covers every grade and label the others do not. LEAVE BLANK AND NO CGC LOT IS BID ON'
+        type: string
+        default: ""
+      bid_order:
+        description: 'Which pools to fill first, as "<column> $<from>-<to>" rungs: "PSA $1-100, CGC $1-100, PSA $100-500, CGC Pristine $100-500". Columns are PSA, CGC, CGC Pristine, CGC Gem Mint. Blank: cheapest first, as before'
         type: string
         default: ""
       value_basis:
@@ -266,6 +270,9 @@ jobs:
           # was not given a table for.
           TIERS_PSA: ${{ inputs.psa_tiers }}
           TIERS_CGC: ${{ inputs.cgc_tiers }}
+          # Which pools the fire fills first. Blank means the cheapest lot
+          # first inside the full arts, which is how every run bid before this.
+          BID_ORDER: ${{ inputs.bid_order }}
           # How a card's price is worked out from its sales: the sales rule —
           # how many, how recent — and the basis, which of them (or what blend
           # of them) the tier tables' percentages multiply. Blank means the

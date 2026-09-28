@@ -136,6 +136,10 @@ import {
   type SelectionCounts,
   type TierBand,
   type TierTable,
+  type TierKey,
+  columnOf,
+  cgcLabel,
+  tierKeyFor,
   type Venue,
   bandBasis,
   bidBasis,
@@ -467,8 +471,8 @@ export function gridBandLabel(price: number, grid: number[] = PRICE_GRID): strin
 }
 
 /** The label of the band of a tier table a bid basis falls in — what the sniper branched on, for the record. */
-export function tierBandLabel(grader: Grader, price: number, table: TierTable = tierTable()): string {
-  const { floor, bands } = table[grader];
+export function tierBandLabel(key: TierKey, price: number, table: TierTable = tierTable()): string {
+  const { floor, bands } = columnOf(key, table);
   if (price < floor) return `<$${floor}`;
   let from = floor;
   for (const [i, band] of bands.entries()) {
@@ -722,20 +726,33 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
 
   // The widest net this table casts: a table whose bands reach further back
   // than the run's own rule prices lots the run's rule would have turned down.
-  const gate = salesGate(price.sales, now, selectionRule(tierTable()[candidate.grader]));
+  // The column this lot is priced from: a CGC 10's label picks its own where
+  // the table has one. The backtest reads the label the same way the run does,
+  // so a split table is measured as it would have bid.
+  const label = cgcLabel(
+    { grade: lot.grade, gradingService: candidate.grader, title: lot.title, pristine: lot.pristine },
+    { gradeText: price.card?.gradeText, condition: price.info?.condition },
+  );
+  const key = tierKeyFor(candidate.grader, lot.grade, label);
+  if (key === null) {
+    row.status = "CGC 10 with no Pristine / Gem Mint label, and this table prices the two apart";
+    return row;
+  }
+
+  const gate = salesGate(price.sales, now, selectionRule(columnOf(key)));
   if (!gate.ok) { row.status = gate.reason ?? "sales gate"; return row; }
 
-  const basis = bandBasis(candidate.grader, evidence);
+  const basis = bandBasis(key, evidence);
   if (basis.price === null) { row.status = basis.reason; return row; }
   if (row.sniper_market_price === "" || row.market_value === "") { row.status = "no priced sales"; return row; }
   row.priceable = true;
   row.grid_band = gridBandLabel(row.sniper_market_price);
-  row.tier_band = tierBandLabel(candidate.grader, basis.price);
+  row.tier_band = tierBandLabel(key, basis.price);
 
   // The sniper's own bid on this lot: the band its value falls in, priced the
   // way that band prices — which is not the way the run prices, wherever the
   // table says so.
-  const quoted = quoteBand(candidate.grader, basis.price, evidence);
+  const quoted = quoteBand(key, basis.price, evidence);
   if (!quoted.ok) { row.status = quoted.reason; return row; }
   const bid = quoted.quote;
   row.sniper_priced_by = bid.via;
