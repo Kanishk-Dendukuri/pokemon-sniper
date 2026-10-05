@@ -12,6 +12,8 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { BidBook, type BidSteps, type Biddable } from "@/scripts/sniper-book";
 import {
   copyGrade,
+  pricesFromJobCards,
+  batchPricingFromArgs,
   DEFAULT_BASIS,
   DEFAULT_GRADE_RANGES,
   DEFAULT_SALES_RULE,
@@ -248,6 +250,27 @@ describe("a purse and a duplicate cap of a grader's own", () => {
     expect(picks.filter((id) => id.startsWith("cgc9-"))).toHaveLength(4);
     expect(picks.filter((id) => id.startsWith("pri-") || id.startsWith("gem-"))).toHaveLength(4);
     expect(picks.filter((id) => id.startsWith("psa10-"))).toHaveLength(7);
+  });
+
+  test("a batch's cards price the way the free lookup does: identity, Alt Value, the newest sales", () => {
+    const prices = pricesFromJobCards([
+      { certificationNumber: 123, cardName: "Pikachu", setName: "151", cardnumber: "025", year: "2023", gradeText: "GEM MT 10", price: "40.50",
+        certPricing: { recentSales: [{ price: 38, date: "2026-09-30", platform: "ebay" }, { price: "41.00", date: "2026-09-20" }, { price: null, date: "2026-09-01" }] } },
+      { cardName: "no cert" },
+    ], "PSA");
+    expect([...prices.keys()]).toEqual(["PSA:123"]);
+    const p = prices.get("PSA:123")!;
+    expect(p.card?.cardName).toBe("Pikachu");
+    expect(p.altValue).toBe(40.5);
+    expect(p.sales).toEqual([{ price: 38, date: "2026-09-30", platform: "ebay" }, { price: 41, date: "2026-09-20" }]);
+    expect(p.error).toBeUndefined();
+    expect(p.info?.description).toBe("2023 151 Pikachu #025");
+  });
+
+  test("batch pricing is off unless a run asks for it", () => {
+    expect(batchPricingFromArgs({})).toBe(0);
+    expect(batchPricingFromArgs({ BATCH_PRICING: "500" })).toBe(500);
+    expect(() => batchPricingFromArgs({ BATCH_PRICING: "lots" })).toThrow(/whole number/);
   });
 
   test("the copy grade is the number, with a CGC 10's label", () => {

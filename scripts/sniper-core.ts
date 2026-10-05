@@ -1061,6 +1061,21 @@ export function parsePerGrader(text: string, what: string, opts: { allOptional?:
 export const DEFAULT_MAX_COPIES_PER_CARD = Infinity;
 
 /**
+ * The most certs a run may price by batch upload when the free per-cert
+ * lookup will not answer them: --batch-pricing=N, or BATCH_PRICING in the
+ * environment. Each one costs 2 credits, so it is off (0) unless asked for,
+ * and the allowance is spent in candidate order — full arts and the cheapest
+ * first — until it runs out.
+ */
+export function batchPricingFromArgs(env: Record<string, string | undefined> = process.env): number {
+  const text = opt("batch-pricing", env.BATCH_PRICING ?? "").trim();
+  if (!text) return 0;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`--batch-pricing must be a whole number of certs, got "${text}"`);
+  return n;
+}
+
+/**
  * The caps a grader has of its own unless the run says otherwise, counted per
  * grade: four CGC 9s of one card, four CGC 10 Pristines, four CGC 10 Gem
  * Mints — and PSA copies in any number. A heap of one CGC slab in one auction
@@ -2229,15 +2244,22 @@ export type CuPrice = {
   error?: string;
 };
 
-type JobData = {
-  results?: {
-    cards?: {
-      cardName?: string; setName?: string; cardnumber?: string; year?: string;
-      gradeNumber?: string; gradeText?: string; language?: string; population?: number;
-      status?: string; certificationNumber?: string;
-    }[];
-  };
+/** One card as a batch's data endpoint returns it — only the fields read here. */
+export type JobCard = {
+  cardName?: string; setName?: string; cardnumber?: string; year?: string;
+  gradeNumber?: string; gradeText?: string; language?: string; population?: number;
+  status?: string; certificationNumber?: string | number;
+  /** The Alt Value the batch filled in, "726.25" or blank. */
+  price?: string | number | null;
+  /** Keyed by grader in lower case — `pricing.cgc.currentAltValue`. */
+  pricing?: Record<string, { currentAltValue?: number | null } | null | undefined> | null;
+  /** The last sale and the five newest sales, which arrive after the identity does. */
+  certPricing?: {
+    recentSales?: { price?: number | string | null; date?: string | null; platform?: string | null; url?: string | null }[] | null;
+  } | null;
 };
+
+type JobData = { results?: { cards?: JobCard[] | null } | null };
 
 type CertPrice = {
   cardInfo?: { cardDescription?: string; condition?: string; gradingCompany?: string };
@@ -2636,6 +2658,91 @@ async function waitForJob(session: CuSession, id: string, expected: number, betw
   }
 }
 
+function cardOf(c: JobCard): CuCard {
+  return {
+    cardName: c.cardName ?? "", setName: c.setName ?? "", cardNumber: c.cardnumber ?? "",
+    year: c.year ?? "", gradeNumber: c.gradeNumber ?? "", gradeText: c.gradeText ?? "",
+    language: c.language ?? "", population: c.population ?? null, status: c.status ?? "",
+  };
+}
+
+function money(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = typeof value === "number" ? value : Number(String(value).replace(/[$,]/g, ""));
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+}
+
+/**
+ * A batch's cards as prices, the same shape the free per-cert lookup gives:
+ * the identity, the Alt Value the batch filled in, and the five newest sales.
+ * Pure, so the mapping can be tested against a captured payload. A card with
+ * no cert is dropped; one with no sales keeps empty sales, which the sales
+ * rule then turns down like any other thin card.
+ */
+export function pricesFromJobCards(cards: JobCard[], grader: string): Map<string, CuPrice> {
+  const out = new Map<string, CuPrice>();
+  for (const c of cards) {
+    const cert = c.certificationNumber === undefined || c.certificationNumber === null ? "" : String(c.certificationNumber).trim();
+    if (!cert) continue;
+    const card = cardOf(c);
+    const alt = money(c.price) ?? Object.values(c.pricing ?? {}).map((p) => money(p?.currentAltValue)).find((v): v is number => v !== null) ?? null;
+    const sales: Sale[] = (c.certPricing?.recentSales ?? []).flatMap((s) => {
+      const price = money(s.price);
+      if (price === null || !s.date) return [];
+      const sale: Sale = { price, date: s.date };
+      if (s.platform) sale.platform = s.platform;
+      if (s.url) sale.url = s.url;
+      return [sale];
+    });
+    out.set(`${grader}:${cert}`, {
+      card,
+      info: {
+        description: [card.year, card.setName, card.cardName, card.cardNumber ? `#${card.cardNumber}` : ""].filter(Boolean).join(" "),
+        condition: card.gradeText,
+        gradingCompany: grader,
+      },
+      altValue: alt,
+      salesAverage: null,
+      sales,
+      attempts: PRICE_ATTEMPTS,
+    });
+  }
+  return out;
+}
+
+/** How long a batch's sales may take to arrive after its identities have. */
+const BATCH_SALES_TIMEOUT_MS = 3 * 60_000;
+const BATCH_SALES_POLL_MS = 5_000;
+/** Reads in a row with no new card's sales before the batch counts as fully priced. */
+const BATCH_SALES_STABLE_POLLS = 3;
+
+/**
+ * A finished batch's data, read again until its sales stop arriving. A card
+ * resolves from its cert before its sales do — separate fetches on Card
+ * Uploader's side — so the first read after the job completes can be missing
+ * most of them. Done when every card has its sales, or the count has held
+ * still for a few reads, or the time is up; whatever is in by then is used.
+ */
+async function waitForSales(session: CuSession, id: string, between?: () => Promise<void>): Promise<JobCard[]> {
+  const deadline = Date.now() + BATCH_SALES_TIMEOUT_MS;
+  let last = -1;
+  let stable = 0;
+  for (;;) {
+    const data = await cuGet<JobData>(session.page, session.bearer, `/backend/jobs/${id}/data`);
+    const cards = data.results?.cards ?? [];
+    const withSales = cards.filter((c) => Array.isArray(c.certPricing?.recentSales)).length;
+    if (cards.length > 0 && withSales === cards.length) return cards;
+    stable = withSales === last ? stable + 1 : 0;
+    last = withSales;
+    if (stable >= BATCH_SALES_STABLE_POLLS || Date.now() > deadline) {
+      console.log(`    sales in for ${withSales} of ${cards.length} card(s) — using what arrived`);
+      return cards;
+    }
+    if (between) await between();
+    await sleep(BATCH_SALES_POLL_MS);
+  }
+}
+
 /**
  * Buys the structured card identity for the lots that survived the bid maths.
  *
@@ -2650,7 +2757,15 @@ export async function identifyViaBatch(
   session: CuSession,
   candidates: Candidate[],
   batchPrefix: string,
-  opts: { between?: () => Promise<void> } = {},
+  opts: {
+    between?: () => Promise<void>;
+    /**
+     * Price off the batch as well: wait for each card's sales to arrive and
+     * put the identity, the Alt Value and the sales here. What the run uses
+     * when the free per-cert lookup will not answer.
+     */
+    prices?: Map<string, CuPrice>;
+  } = {},
 ): Promise<Map<string, CuCard>> {
   const identified = new Map<string, CuCard>();
   const { page, bearer } = session;
@@ -2675,16 +2790,17 @@ export async function identifyViaBatch(
 
       // A cert the grader has no record of never resolves and is simply
       // missing from the results, so one short costs that card and nothing else.
-      const data = await cuGet<JobData>(page, bearer, `/backend/jobs/${id}/data`);
+      const cards = opts.prices
+        ? await waitForSales(session, id, opts.between)
+        : (await cuGet<JobData>(page, bearer, `/backend/jobs/${id}/data`)).results?.cards ?? [];
       let found = 0;
-      for (const c of data.results?.cards ?? []) {
+      for (const c of cards) {
         if (!c.certificationNumber) continue;
-        identified.set(`${batch.grader}:${c.certificationNumber}`, {
-          cardName: c.cardName ?? "", setName: c.setName ?? "", cardNumber: c.cardnumber ?? "",
-          year: c.year ?? "", gradeNumber: c.gradeNumber ?? "", gradeText: c.gradeText ?? "",
-          language: c.language ?? "", population: c.population ?? null, status: c.status ?? "",
-        });
+        identified.set(`${batch.grader}:${String(c.certificationNumber).trim()}`, cardOf(c));
         found++;
+      }
+      if (opts.prices) {
+        for (const [key, price] of pricesFromJobCards(cards, batch.grader)) opts.prices.set(key, price);
       }
       console.log(`    ${found} of ${batch.certs.length} cert(s) identified${job.new_credit_balance ? `  ·  ${job.new_credit_balance} credits left` : ""}`);
       consecutiveFailures = 0;
@@ -3320,6 +3436,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   setBidOrder(bidOrderFrom());
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setGraderCopyCaps(graderCopyCapsFromArgs());
+  const batchPricingLimit = batchPricingFromArgs();
   setSourcingCheck(sourcingCheckFromArgs());
   setSalesRule(salesRuleFromArgs());
   setBasis(basisFromArgs());
@@ -3368,6 +3485,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   console.log(`    per card     ${Number.isFinite(maxCopiesPerCard()) ? `at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` : "every copy of a card"}` +
     (graderCaps.length > 0 ? `, ${Number.isFinite(maxCopiesPerCard()) ? "and " : "except "}at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} copies of it per grade` : ""));
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
+  console.log(`    batch price  ${batchPricingLimit > 0 ? `up to ${batchPricingLimit} cert(s) the free lookup will not answer are priced by batch upload, ~${batchPricingLimit * 2} credits at most` : "off — a cert the free lookup will not answer goes unpriced (--batch-pricing=N to buy up to N)"}`);
   console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);
   if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
   if (wantEmail) console.log(`    account      ${wantEmail}`);
@@ -3448,6 +3566,7 @@ export async function runSniper(venue: Venue): Promise<void> {
      * patience this time.
      */
     let rounds = 0;
+    let batchPriced = 0;
     const pricingStartedMs = Date.now();
     const priceRound = async (batch: Candidate[], sweep = false): Promise<void> => {
       rounds++;
@@ -3458,6 +3577,30 @@ export async function runSniper(venue: Venue): Promise<void> {
       if (cu) {
         await refreshCuToken(cu);
         await priceByCert(cu, batch, { prices, concurrency, sweep, between: live ? pollBetween : undefined });
+        // The fallback for the certs the free lookup would not answer: upload
+        // them as a batch and price off the batch's own sales. 2 credits a
+        // cert, so only up to --batch-pricing certs a run.
+        const unanswered = batch.filter((c) => {
+          const p = prices.get(`${c.grader}:${c.cert}`);
+          return !p || p.error !== undefined;
+        });
+        const room = batchPricingLimit - batchPriced;
+        if (unanswered.length > 0 && room > 0) {
+          const take = unanswered.slice(0, room);
+          batchPriced += take.length;
+          console.log(`    pricing ${take.length} unanswered cert(s) by batch upload  (~${take.length * 2} credits, ${batchPricingLimit - batchPriced} of the --batch-pricing allowance left)`);
+          const before = take.filter((c) => !prices.get(`${c.grader}:${c.cert}`)?.error).length;
+          try {
+            await identifyViaBatch(cu, take, batchPrefix, { between: live ? pollBetween : undefined, prices });
+          } catch (err) {
+            console.error(`    ✖  batch pricing failed: ${err instanceof Error ? err.message : err}`);
+          }
+          const got = take.filter((c) => !prices.get(`${c.grader}:${c.cert}`)?.error).length - before;
+          console.log(`    batch-priced ${got} of ${take.length}`);
+        } else if (unanswered.length > 0 && batchPricingLimit === 0 && rounds === 1) {
+          const sample = prices.get(`${unanswered[0].grader}:${unanswered[0].cert}`)?.error;
+          console.log(`    ${unanswered.length} cert(s) unanswered by the free lookup${sample ? ` (e.g. ${sample.slice(0, 160)})` : ""} — --batch-pricing=N would price up to N of them by batch upload, 2 credits each`);
+        }
       }
 
       let passed: Row[] = [];
@@ -3526,17 +3669,22 @@ export async function runSniper(venue: Venue): Promise<void> {
       // The one step that spends credits, and only on what survived the maths.
       // card_key comes from it, and card_key is what holds a run to its few
       // lots of one card, so the cap depends on this landing.
-      if (cu && survivors.length > 0) {
-        console.log(`    identifying ${survivors.length} surviving lot(s)  (~${survivors.length * 2} credits)`);
-        identifiedFor += survivors.length;
+      // A lot priced by batch already has its identity: no second purchase.
+      const toIdentify = survivors.filter((c) => !prices.get(`${c.grader}:${c.cert}`)?.card);
+      if (cu && survivors.length > 0 && toIdentify.length === 0) {
+        console.log(`    ${survivors.length} surviving lot(s) already identified by the batch`);
+      }
+      if (cu && toIdentify.length > 0) {
+        console.log(`    identifying ${toIdentify.length} surviving lot(s)  (~${toIdentify.length * 2} credits)`);
+        identifiedFor += toIdentify.length;
         const identifying = Date.now();
         try {
-          const cards = await identifyViaBatch(cu, survivors, batchPrefix, { between: live ? pollBetween : undefined });
+          const cards = await identifyViaBatch(cu, toIdentify, batchPrefix, { between: live ? pollBetween : undefined });
           for (const [key, card] of cards) {
             const price = prices.get(key);
             if (price) price.card = card;
           }
-          console.log(`    identified ${cards.size} of ${survivors.length} in ${((Date.now() - identifying) / 1000).toFixed(0)}s`);
+          console.log(`    identified ${cards.size} of ${toIdentify.length} in ${((Date.now() - identifying) / 1000).toFixed(0)}s`);
           // Re-run the same maths now the identity is in hand: the verdict does
           // not depend on it, but card_key and the flags do. The bidding as
           // quoted above is carried over, since a fresh row only knows the

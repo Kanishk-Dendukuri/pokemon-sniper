@@ -281,6 +281,8 @@ jobs:
           SALES_RULE: ${{ inputs.sales_rule }}
           # The per-card cap, the same way. Blank means the code's own default.
           MAX_COPIES_PER_CARD: ${{ inputs.max_copies_per_card }}
+          # Certs the free lookup will not answer, priced by batch upload at 2 credits each. A repo variable, so no workflow input is spent on it.
+          BATCH_PRICING: ${{ vars.BATCH_PRICING }}
           # When the bids go on, in minutes after extended bidding opens.
           # Blank means the venue's own default.
           FIRE_AFTER_MINUTES: ${{ inputs.fire_after_minutes }}
