@@ -1061,6 +1061,16 @@ export function parsePerGrader(text: string, what: string, opts: { allOptional?:
 export const DEFAULT_MAX_COPIES_PER_CARD = Infinity;
 
 /**
+ * --batch-only (BATCH_ONLY=1): skip the free per-cert lookup altogether and
+ * price every candidate by batch upload. With no --batch-pricing allowance
+ * that is every candidate — 2 credits each.
+ */
+export function batchOnlyFromArgs(env: Record<string, string | undefined> = process.env): boolean {
+  if (process.argv.includes("--batch-only")) return true;
+  return /^(1|true|yes)$/i.test((env.BATCH_ONLY ?? "").trim());
+}
+
+/**
  * The most certs a run may price by batch upload when the free per-cert
  * lookup will not answer them: --batch-pricing=N, or BATCH_PRICING in the
  * environment. Each one costs 2 credits, so it is off (0) unless asked for,
@@ -1069,7 +1079,8 @@ export const DEFAULT_MAX_COPIES_PER_CARD = Infinity;
  */
 export function batchPricingFromArgs(env: Record<string, string | undefined> = process.env): number {
   const text = opt("batch-pricing", env.BATCH_PRICING ?? "").trim();
-  if (!text) return 0;
+  if (!text) return batchOnlyFromArgs(env) ? Infinity : 0;
+  if (/^(all|every|unlimited)$/i.test(text)) return Infinity;
   const n = Number(text);
   if (!Number.isInteger(n) || n < 0) throw new Error(`--batch-pricing must be a whole number of certs, got "${text}"`);
   return n;
@@ -3436,6 +3447,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   setBidOrder(bidOrderFrom());
   setMaxCopiesPerCard(maxCopiesFromArgs());
   setGraderCopyCaps(graderCopyCapsFromArgs());
+  const batchOnly = batchOnlyFromArgs();
   const batchPricingLimit = batchPricingFromArgs();
   setSourcingCheck(sourcingCheckFromArgs());
   setSalesRule(salesRuleFromArgs());
@@ -3485,7 +3497,11 @@ export async function runSniper(venue: Venue): Promise<void> {
   console.log(`    per card     ${Number.isFinite(maxCopiesPerCard()) ? `at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` : "every copy of a card"}` +
     (graderCaps.length > 0 ? `, ${Number.isFinite(maxCopiesPerCard()) ? "and " : "except "}at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} copies of it per grade` : ""));
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
-  console.log(`    batch price  ${batchPricingLimit > 0 ? `up to ${batchPricingLimit} cert(s) the free lookup will not answer are priced by batch upload, ~${batchPricingLimit * 2} credits at most` : "off — a cert the free lookup will not answer goes unpriced (--batch-pricing=N to buy up to N)"}`);
+  console.log(`    batch price  ${batchOnly
+    ? `every candidate priced by batch upload, the free lookup skipped${Number.isFinite(batchPricingLimit) ? ` — up to ${batchPricingLimit} cert(s), ~${batchPricingLimit * 2} credits at most` : " — 2 credits a cert, no cap"}`
+    : batchPricingLimit > 0
+      ? `up to ${Number.isFinite(batchPricingLimit) ? batchPricingLimit : "every"} cert(s) the free lookup will not answer are priced by batch upload, 2 credits each`
+      : "off — a cert the free lookup will not answer goes unpriced (--batch-pricing=N to buy up to N)"}`);
   console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);
   if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
   if (wantEmail) console.log(`    account      ${wantEmail}`);
@@ -3567,6 +3583,7 @@ export async function runSniper(venue: Venue): Promise<void> {
      */
     let rounds = 0;
     let batchPriced = 0;
+    const batchTried = new Set<string>();
     const pricingStartedMs = Date.now();
     const priceRound = async (batch: Candidate[], sweep = false): Promise<void> => {
       rounds++;
@@ -3576,24 +3593,34 @@ export async function runSniper(venue: Venue): Promise<void> {
 
       if (cu) {
         await refreshCuToken(cu);
-        await priceByCert(cu, batch, { prices, concurrency, sweep, between: live ? pollBetween : undefined });
+        if (!batchOnly) await priceByCert(cu, batch, { prices, concurrency, sweep, between: live ? pollBetween : undefined });
         // The fallback for the certs the free lookup would not answer: upload
         // them as a batch and price off the batch's own sales. 2 credits a
         // cert, so only up to --batch-pricing certs a run.
         const unanswered = batch.filter((c) => {
-          const p = prices.get(`${c.grader}:${c.cert}`);
+          const key = `${c.grader}:${c.cert}`;
+          if (batchTried.has(key)) return false;
+          const p = prices.get(key);
           return !p || p.error !== undefined;
         });
         const room = batchPricingLimit - batchPriced;
         if (unanswered.length > 0 && room > 0) {
           const take = unanswered.slice(0, room);
           batchPriced += take.length;
-          console.log(`    pricing ${take.length} unanswered cert(s) by batch upload  (~${take.length * 2} credits, ${batchPricingLimit - batchPriced} of the --batch-pricing allowance left)`);
+          // Paid for once: a cert the batch could not resolve is not bought again.
+          for (const c of take) batchTried.add(`${c.grader}:${c.cert}`);
+          console.log(`    pricing ${take.length} cert(s) by batch upload  (~${take.length * 2} credits${Number.isFinite(batchPricingLimit) ? `, ${batchPricingLimit - batchPriced} of the --batch-pricing allowance left` : ""})`);
           const before = take.filter((c) => !prices.get(`${c.grader}:${c.cert}`)?.error).length;
           try {
             await identifyViaBatch(cu, take, batchPrefix, { between: live ? pollBetween : undefined, prices });
           } catch (err) {
             console.error(`    ✖  batch pricing failed: ${err instanceof Error ? err.message : err}`);
+          }
+          for (const c of take) {
+            const key = `${c.grader}:${c.cert}`;
+            if (!prices.get(key)) {
+              prices.set(key, { card: null, info: null, altValue: null, salesAverage: null, sales: [], attempts: PRICE_ATTEMPTS, error: "batch upload did not resolve the cert" });
+            }
           }
           const got = take.filter((c) => !prices.get(`${c.grader}:${c.cert}`)?.error).length - before;
           console.log(`    batch-priced ${got} of ${take.length}`);
