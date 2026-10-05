@@ -1061,13 +1061,16 @@ export function parsePerGrader(text: string, what: string, opts: { allOptional?:
 export const DEFAULT_MAX_COPIES_PER_CARD = Infinity;
 
 /**
- * --batch-only (BATCH_ONLY=1): skip the free per-cert lookup altogether and
- * price every candidate by batch upload. With no --batch-pricing allowance
+ * Batch-only, the default: skip the free per-cert lookup altogether and price
+ * every candidate by batch upload (--free-lookup or BATCH_ONLY=0 turns it off). With no --batch-pricing allowance
  * that is every candidate — 2 credits each.
  */
 export function batchOnlyFromArgs(env: Record<string, string | undefined> = process.env): boolean {
-  if (process.argv.includes("--batch-only")) return true;
-  return /^(1|true|yes)$/i.test((env.BATCH_ONLY ?? "").trim());
+  // The default since 2026-10-04, when Card Uploader's free per-cert endpoint
+  // started answering 404 for every cert. --free-lookup / BATCH_ONLY=0 is the
+  // way back to it, should it return.
+  if (process.argv.includes("--free-lookup")) return false;
+  return !/^(0|false|no)$/i.test((env.BATCH_ONLY ?? "").trim());
 }
 
 /**

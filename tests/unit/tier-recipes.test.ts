@@ -267,8 +267,9 @@ describe("a purse and a duplicate cap of a grader's own", () => {
     expect(p.info?.description).toBe("2023 151 Pikachu #025");
   });
 
-  test("batch pricing is off unless a run asks for it", () => {
-    expect(batchPricingFromArgs({})).toBe(0);
+  test("every candidate is priced by batch unless the run asks for the free lookup", () => {
+    expect(batchPricingFromArgs({})).toBe(Infinity);
+    expect(batchPricingFromArgs({ BATCH_ONLY: "0" })).toBe(0);
     expect(batchPricingFromArgs({ BATCH_PRICING: "500" })).toBe(500);
     expect(() => batchPricingFromArgs({ BATCH_PRICING: "lots" })).toThrow(/whole number/);
   });
