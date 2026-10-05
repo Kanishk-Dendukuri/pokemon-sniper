@@ -179,9 +179,9 @@ on:
         type: string
         default: "5 sales in 60 days"
       max_copies_per_card:
-        description: 'Most lots of one card to hold at once, across every grade and both graders. A grader may have a cap of its own, counted over its own copies: "6, CGC 4"'
+        description: 'Copies of one card to hold at once. "CGC 4" (default): every copy is bid on, but at most 4 CGC copies of a card at the same grade; PSA is uncapped. A bare number caps the card across everything too: "6, CGC 4"'
         type: string
-        default: "4, CGC 4"
+        default: "CGC 4"
       fire_after_minutes:
         description: 'Minutes after extended bidding opens (9:00 PM ET) to put the bids on (or sooner, the moment the auction reads seconds from its end). Negative fires before it instead: "-30" or "30 before"'
         type: string

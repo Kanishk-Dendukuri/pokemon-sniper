@@ -452,6 +452,21 @@ describe("the ledger", () => {
     ]).stopReason()).toBeNull();
   });
 
+  test("CGC copies are capped per grade, PSA ones only by the card-wide cap", () => {
+    const key = "pikachu|151|025";
+    const items = [
+      ...[0, 1, 2, 3].map((n) => item({ itemId: `cgc9-${n}`, status: "bid", cardKey: key, grader: "CGC", grade: 9, maxAllInCents: 100 })),
+      ...[0, 1, 2, 3, 4].map((n) => item({ itemId: `psa-${n}`, status: "won", cardKey: key, grader: "PSA", grade: 10, paidAllInCents: 100 })),
+    ];
+    const state = emptyState();
+    for (const i of items) state.items[i.itemId] = i;
+    const ledger = new Ledger(state, 100_000, Infinity, 0, { CGC: 4 });
+    expect(ledger.capReason({ cardKey: key, grader: "CGC", grade: 9 })).toMatch(/4 CGC 9 copies/);
+    expect(ledger.capReason({ cardKey: key, grader: "CGC", grade: 9 }, true)).toBeNull();
+    expect(ledger.capReason({ cardKey: key, grader: "CGC", grade: 10 })).toBeNull();
+    expect(ledger.capReason({ cardKey: key, grader: "PSA", grade: 10 })).toBeNull();
+  });
+
   test("the per-card cap counts copies in flight and won", () => {
     const ledger = ledgerOf([
       item({ itemId: "a", status: "won", cardKey: "pikachu|151|025", paidAllInCents: 100 }),

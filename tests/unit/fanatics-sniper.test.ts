@@ -11,6 +11,7 @@ import {
   timeToFire,
   CSV_COLUMNS,
   DEFAULT_TIERS,
+  DEFAULT_GRADER_COPY_CAPS,
   DEFAULT_MAX_COPIES_PER_CARD,
   applyRule,
   blockedBy,
@@ -498,9 +499,19 @@ describe("per-card caps", () => {
       .toContain("082/080");
   });
 
-  test("four lots of one card per auction by default, and nothing is read from the database", () => {
-    expect(DEFAULT_MAX_COPIES_PER_CARD).toBe(4);
-    expect(cardCaps()).toEqual({ perCard: 4, perCardByGrader: {} });
+  test("every copy of a card by default, except four CGC copies per grade, and nothing is read from the database", () => {
+    expect(DEFAULT_MAX_COPIES_PER_CARD).toBe(Infinity);
+    expect(DEFAULT_GRADER_COPY_CAPS).toEqual({ CGC: 4 });
+    expect(cardCaps()).toEqual({ perCard: Infinity, perCardByGrader: { CGC: 4 } });
+    expect(graderCopyCapsFromArgs({})).toEqual({ CGC: 4 });
+  });
+
+  test("a box that names only a grader sets no card-wide cap", () => {
+    expect(maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "CGC 4" })).toBe(Infinity);
+    expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "CGC 4" })).toEqual({ CGC: 4 });
+    expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "CGC 2, PSA 8" })).toEqual({ CGC: 2, PSA: 8 });
+    // The CGC default stands when the box only names the card-wide figure.
+    expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "6" })).toEqual({ CGC: 4 });
   });
 
   test("the run's own cap wins over the default, and only a whole number of at least 1 is one", () => {
@@ -511,7 +522,7 @@ describe("per-card caps", () => {
     expect(() => maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "lots" })).toThrow(/cannot read "lots"/);
     // A grader may have a cap of its own in the same box.
     expect(maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "6, CGC 4" })).toBe(6);
-    expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "6, CGC 4" })).toEqual({ CGC: 4 });
+    expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "6, CGC 3" })).toEqual({ CGC: 3 });
     expect(graderCopyCapsFromArgs({ MAX_COPIES_PER_CARD: "6, CGC 4", MAX_COPIES_CGC: "2" })).toEqual({ CGC: 2 });
     expect(() => maxCopiesFromArgs({ MAX_COPIES_PER_CARD: "6, BGS 4" })).toThrow(/not a grader/);
   });
@@ -519,7 +530,7 @@ describe("per-card caps", () => {
   test("the cap the run was given is the one the book bids under", () => {
     try {
       setMaxCopiesPerCard(2);
-      expect(cardCaps()).toEqual({ perCard: 2, perCardByGrader: {} });
+      expect(cardCaps()).toEqual({ perCard: 2, perCardByGrader: { CGC: 4 } });
     } finally {
       setMaxCopiesPerCard(DEFAULT_MAX_COPIES_PER_CARD);
     }
@@ -636,12 +647,12 @@ describe("the last cut before the bid list", () => {
     const out = finalCut([row({ card_key: "" })]);
     expect(out.worthy).toEqual([]);
     expect(out.flaggedOut).toBe(1);
-    expect(out.dropped[0].reason).toMatch(/4-per-card cap could not be checked/);
+    expect(out.dropped[0].reason).toMatch(/per-card cap could not be checked/);
   });
 
   test("every copy of a card goes on the list — the book holds the per-card cap, so the copy past it gets its turn", () => {
     const key = "pikachu|base|58";
-    const copies = DEFAULT_MAX_COPIES_PER_CARD + 1;
+    const copies = DEFAULT_GRADER_COPY_CAPS.CGC + 1;
     const out = finalCut(
       [...Array.from({ length: copies }, () => row({ card_key: key })), row({ card_key: key, flags: "language: cert says Japanese" })],
     );

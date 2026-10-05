@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { BidBook, type BidSteps, type Biddable } from "@/scripts/sniper-book";
 import {
+  copyGrade,
   DEFAULT_BASIS,
   DEFAULT_GRADE_RANGES,
   DEFAULT_SALES_RULE,
@@ -226,6 +227,33 @@ describe("a purse and a duplicate cap of a grader's own", () => {
     const plan = book.plan(pool);
     // Two CGC copies, then the card's own cap of six takes the rest.
     expect(plan.picks.map((p) => p.listingId)).toEqual(["a", "b", "d", "e", "f"]);
+  });
+
+  test("CGC is held to four copies of a card at each grade, and PSA to none", () => {
+    const at = (id: string, grader: string, grade: string): Biddable => ({ ...lot(id, grader, 10), grade });
+    const book = new BidBook(null, {
+      budgetCents: 1_000_000, live: false, log: () => {}, steps: STEPS,
+      caps: { perCard: Infinity, perCardByGrader: { CGC: 4 } },
+    });
+    const pool = [
+      ...["a", "b", "c", "d", "e"].map((id) => at(`cgc9-${id}`, "CGC", "9")),
+      ...["a", "b"].map((id) => at(`pri-${id}`, "CGC", "10 Pristine")),
+      ...["a", "b"].map((id) => at(`gem-${id}`, "CGC", "10 Gem Mint")),
+      ...["a", "b", "c", "d", "e", "f", "g"].map((id) => at(`psa10-${id}`, "PSA", "10")),
+    ];
+    const picks = book.plan(pool).picks.map((p) => p.listingId);
+    // The fifth CGC 9 is the only copy left off: the 10s are other grades,
+    // a Pristine and a Gem Mint are not the same slab, and PSA is uncapped.
+    expect(picks).not.toContain("cgc9-e");
+    expect(picks.filter((id) => id.startsWith("cgc9-"))).toHaveLength(4);
+    expect(picks.filter((id) => id.startsWith("pri-") || id.startsWith("gem-"))).toHaveLength(4);
+    expect(picks.filter((id) => id.startsWith("psa10-"))).toHaveLength(7);
+  });
+
+  test("the copy grade is the number, with a CGC 10's label", () => {
+    expect(copyGrade({ grade: "9", grade_label: "" })).toBe("9");
+    expect(copyGrade({ grade: "10", grade_label: "Pristine" })).toBe("10 Pristine");
+    expect(copyGrade({ grade: "", grade_label: "" })).toBeUndefined();
   });
 
   test("one box carries the run's figure and a grader's", () => {

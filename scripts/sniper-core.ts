@@ -28,6 +28,10 @@
  * copy of a card the per-card cap held back is bid on once a copy under it is
  * outbid, and a bid the house turned down in the rush is quoted again.
  *
+ * Every copy of a card is bid on — PSA in any number — except CGC: no more
+ * than four CGC copies of one card at one grade are held at once (a CGC 10
+ * Pristine and a CGC 10 Gem Mint are two grades here). See CardCaps.
+ *
  * When the fire is, and why, is the house's own rule (Venue.fireAfterMinutes,
  * the "fire after" box on the workflow): minutes after extended bidding was
  * scheduled to open. At Fanatics that is 27 — lots close one by one there,
@@ -84,10 +88,11 @@
  *      --awardable-only also refuses a card worth a figure no pack could
  *      award (lib/odds-config.ts unawardableRanges — under $7.50, over
  *      $16,925, or in the hole between two tiers); off by default, since
- *      what the app does with a card it has bought is the app's business. No
- *      more than the per-card cap — --max-copies-per-card, 4 by default — of
- *      one card are winning or won in one auction, whatever their grade or
- *      grader; nothing is read from the database. The median of the same sales is carried along as the
+ *      what the app does with a card it has bought is the app's business.
+ *      Every copy of a card is bid on, except that no more than four CGC
+ *      copies of one card at one grade are winning or won in one auction —
+ *      --max-copies-per-card, "CGC 4" by default; PSA has no cap unless the
+ *      run gives it one. Nothing is read from the database. The median of the same sales is carried along as the
  *      market value a won lot is measured against in the CSV: what was paid
  *      all-in, as a share of it.
  *   5. Anything the cert disagrees with the listing about — grade, year, set,
@@ -179,13 +184,16 @@
  *                         does (AWARDABLE_ONLY=1 for a workflow). Off unless
  *                         asked for: the sniper buys cards, and what becomes
  *                         of one afterwards is not the bid's business
- *   --max-copies-per-card=4  the most lots of one card to be winning or have
- *                         won at once, counted across every grade and both
- *                         graders; the MAX_COPIES_PER_CARD environment
- *                         variable does the same, for a workflow input
- *                         (default DEFAULT_MAX_COPIES_PER_CARD). A grader may
- *                         have a cap of its own over its own copies, in the
- *                         same box — "6, CGC 4" — or with --max-copies-cgc
+ *   --max-copies-per-card="CGC 4"  the most lots of one card to be winning
+ *                         or have won at once. A bare number caps the card
+ *                         across every grade and both graders; a grader's
+ *                         own figure caps that grader's copies at each grade
+ *                         — "6, CGC 4" is six of the card in all and four
+ *                         CGC copies per grade. With no bare number there is
+ *                         no card-wide cap. MAX_COPIES_PER_CARD does the same
+ *                         for a workflow input, --max-copies-cgc /
+ *                         --max-copies-psa set one grader's alone. Default:
+ *                         no card-wide cap, CGC 4 per grade, PSA uncapped
  *   --count-existing-bids charge the bids already on the account to --budget:
  *                         a $2,000 run finding $600 of open bids on the
  *                         account has $1,400 to spend, not $2,000. Those lots
@@ -984,17 +992,6 @@ export function readSections(grader: Grader, text: string): [TierKey, GraderTier
 }
 
 /**
- * The most lots of one card to be winning or have won in one auction — the
- * card being name, set, number and language, whatever the grade or grader.
- * Counted live by the book: an outbid copy makes room for the next.
- *
- * DEFAULT_MAX_COPIES_PER_CARD is what a run uses unless told otherwise. A run
- * is told with --max-copies-per-card=N, or MAX_COPIES_PER_CARD in the
- * environment (the workflow input). The cap is one number for the card: the
- * copies are counted across every grade and both graders, so four PSA 9s and
- * a CGC 10 of the same card are five copies, not two piles.
- */
-/**
  * A ceiling of its own for one grader, under the run's: --budget-psa=6000,
  * --budget-cgc=1500, or BUDGET_PSA / BUDGET_CGC in the environment (the
  * workflow boxes). A grader left blank spends the run's ceiling like any
@@ -1026,7 +1023,9 @@ export function graderBudgetsFromArgs(env: Record<string, string | undefined> = 
  * Returns the run's figure and whatever graders were named; the flags
  * (--budget-psa and the rest) still override what is here.
  */
-export function parsePerGrader(text: string, what: string): { all: number; byGrader: Record<string, number> } {
+export function parsePerGrader(text: string, what: string): { all: number; byGrader: Record<string, number> };
+export function parsePerGrader(text: string, what: string, opts: { allOptional: true }): { all: number | null; byGrader: Record<string, number> };
+export function parsePerGrader(text: string, what: string, opts: { allOptional?: boolean } = {}): { all: number | null; byGrader: Record<string, number> } {
   const parts = text.split(/[,;]/).map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) throw new Error(`${what} cannot be blank`);
   const byGrader: Record<string, number> = {};
@@ -1045,11 +1044,29 @@ export function parsePerGrader(text: string, what: string): { all: number; byGra
     if (!grader) throw new Error(`"${m[1]}" in ${what} is not a grader — want ${GRADERS.join(" or ")}`);
     byGrader[grader] = value;
   }
-  if (all === null) throw new Error(`${what} needs a figure for the run itself, not only per grader: "${text}"`);
+  if (all === null && !opts.allOptional) throw new Error(`${what} needs a figure for the run itself, not only per grader: "${text}"`);
   return { all, byGrader };
 }
 
-export const DEFAULT_MAX_COPIES_PER_CARD = 4;
+/**
+ * The most lots of one card to be winning or have won in one auction — the
+ * card being name, set, number and language, whatever the grade or grader.
+ * Counted live by the book: an outbid copy makes room for the next.
+ *
+ * By default there is none: every copy of a card is bid on, and the only
+ * limit is the CGC one below. A run sets one with a bare number in
+ * --max-copies-per-card / MAX_COPIES_PER_CARD ("6", or "6, CGC 4"), counted
+ * across every grade and both graders.
+ */
+export const DEFAULT_MAX_COPIES_PER_CARD = Infinity;
+
+/**
+ * The caps a grader has of its own unless the run says otherwise, counted per
+ * grade: four CGC 9s of one card, four CGC 10 Pristines, four CGC 10 Gem
+ * Mints — and PSA copies in any number. A heap of one CGC slab in one auction
+ * is a heap the price will not hold for, so the fifth is left to someone else.
+ */
+export const DEFAULT_GRADER_COPY_CAPS: Readonly<Record<string, number>> = { CGC: 4 };
 
 let activeMaxCopies = DEFAULT_MAX_COPIES_PER_CARD;
 
@@ -1065,13 +1082,15 @@ export function setMaxCopiesPerCard(copies: number): void {
 
 /**
  * The cap a run was given: the flag, else the environment variable, else the
- * default. Anything that is not a whole number of at least 1 stops the run
- * here, before anything is scanned, rather than being rounded into a guess.
+ * default. A box that names only graders' caps — "CGC 4" — sets no card-wide
+ * one. Anything that is not a whole number of at least 1 stops the run here,
+ * before anything is scanned, rather than being rounded into a guess.
  */
 export function maxCopiesFromArgs(env: Record<string, string | undefined> = process.env): number {
   const text = opt("max-copies-per-card", env.MAX_COPIES_PER_CARD ?? "").trim();
   if (!text) return DEFAULT_MAX_COPIES_PER_CARD;
-  const copies = parsePerGrader(text, "--max-copies-per-card").all;
+  const copies = parsePerGrader(text, "--max-copies-per-card", { allOptional: true }).all;
+  if (copies === null) return DEFAULT_MAX_COPIES_PER_CARD;
   if (!Number.isInteger(copies) || copies < 1) {
     throw new Error(`--max-copies-per-card must be a whole number of at least 1, got "${text}"`);
   }
@@ -1081,15 +1100,17 @@ export function maxCopiesFromArgs(env: Record<string, string | undefined> = proc
 /**
  * A per-card cap of its own for one grader: --max-copies-cgc=4, or
  * MAX_COPIES_CGC in the environment (the workflow box). Counted over that
- * grader's copies alone, so four CGC copies of a card and four PSA ones are
- * eight lots; the run's own --max-copies-per-card still caps the card across
- * both. A grader left blank is held to that alone.
+ * grader's copies alone and at each grade apart, so four CGC 9s of a card,
+ * four CGC 10s and any number of PSA copies can all be held at once; the
+ * run's own card-wide cap, if it has one, still caps the card across them
+ * all. CGC is 4 unless the run says otherwise (DEFAULT_GRADER_COPY_CAPS); a
+ * grader with no cap here is held to the card-wide cap alone.
  */
 export function graderCopyCapsFromArgs(env: Record<string, string | undefined> = process.env): Record<string, number> {
-  const caps: Record<string, number> = {};
-  // "4, CGC 4" in the one box, and the flags below still win over it.
+  const caps: Record<string, number> = { ...DEFAULT_GRADER_COPY_CAPS };
+  // "CGC 4" or "6, CGC 4" in the one box, and the flags below still win over it.
   const box = opt("max-copies-per-card", env.MAX_COPIES_PER_CARD ?? "").trim();
-  if (box) Object.assign(caps, parsePerGrader(box, "--max-copies-per-card").byGrader);
+  if (box) Object.assign(caps, parsePerGrader(box, "--max-copies-per-card", { allOptional: true }).byGrader);
   for (const grader of GRADERS) {
     const text = opt(`max-copies-${grader.toLowerCase()}`, env[`MAX_COPIES_${grader}`] ?? "").trim();
     if (!text) continue;
@@ -2934,8 +2955,9 @@ export function toCsv(rows: Row[]): string {
  * the other bidders are pricing off the title. When those are not the same
  * card, the max bid is the wrong card's, and a wrong bid costs money.
  *
- * The per-card cap — maxCopiesPerCard() lots of one card winning or won at
- * once — is the book's, counted live: every copy goes onto the list, and the
+ * The per-card caps — four CGC copies of a card at one grade winning or won
+ * at once, and any card-wide cap the run was given — are the book's, counted
+ * live: every copy goes onto the list, and the
  * book bids the one past the cap only once a copy under it has been outbid. A
  * run with a low strike rate is outbid on most of what it holds, and a copy
  * that was cut at the list would never have had its turn. A lot that never
@@ -2969,7 +2991,7 @@ export function finalCut(passed: Row[]): { worthy: Row[]; dropped: Row[]; flagge
       continue;
     }
     if (!row.card_key) {
-      dropped.push({ ...row, reason: `cert did not identify, so the ${maxCopiesPerCard()}-per-card cap could not be checked` });
+      dropped.push({ ...row, reason: "cert did not identify, so the per-card cap could not be checked" });
       flaggedOut++;
       continue;
     }
@@ -3102,10 +3124,22 @@ export function toBiddable(row: Row): Biddable | null {
     bidCount: Number(row.bid_count) || 0,
     cardKey: row.card_key || undefined,
     grader: row.grader || undefined,
+    grade: copyGrade(row),
   };
 }
 
-let activeGraderCopyCaps: Record<string, number> = {};
+/**
+ * The grade a grader's own copy cap counts a lot under: the number, and for a
+ * CGC 10 its label too — a Pristine and a Gem Mint are not the same slab.
+ */
+export function copyGrade(row: Pick<Row, "grade" | "grade_label">): string | undefined {
+  const grade = String(row.grade ?? "").trim();
+  if (!grade) return undefined;
+  const label = String(row.grade_label ?? "").trim();
+  return label ? `${grade} ${label}` : grade;
+}
+
+let activeGraderCopyCaps: Record<string, number> = { ...DEFAULT_GRADER_COPY_CAPS };
 
 /** Cap this grader's copies of a card from now on — what --max-copies-cgc does. */
 export function setGraderCopyCaps(caps: Record<string, number>): void {
@@ -3331,8 +3365,8 @@ export async function runSniper(venue: Venue): Promise<void> {
   const graderCaps = Object.entries(cardCaps().perCardByGrader ?? {});
   console.log(`    grades       ${GRADERS.map((g) => `${g} ${formatGradeRange(gradeRanges()[g])}`).join(", ")}`);
   if (sourcingCheck()) console.log(`    sourcing     only cards a pack could award are bought (--awardable-only): $7.50 to $16,925, nothing in the jackpot hole`);
-  console.log(`    per card     at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` +
-    (graderCaps.length > 0 ? `, and at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} of it` : ""));
+  console.log(`    per card     ${Number.isFinite(maxCopiesPerCard()) ? `at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` : "every copy of a card"}` +
+    (graderCaps.length > 0 ? `, ${Number.isFinite(maxCopiesPerCard()) ? "and " : "except "}at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} copies of it per grade` : ""));
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
   console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);
   if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
@@ -3518,7 +3552,7 @@ export async function runSniper(venue: Venue): Promise<void> {
         } catch (err) {
           await snapshotFailure(cu.page, outDir);
           console.error(`    ✖  identification failed: ${err instanceof Error ? err.message : err}`);
-          console.error(`       these lots stay unidentified, so the ${maxCopiesPerCard()}-per-card cap holds them back`);
+          console.error("       these lots stay unidentified, so the per-card cap holds them back");
         }
       }
 

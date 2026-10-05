@@ -99,7 +99,7 @@ import type { BidSteps } from "./sniper-book";
 import {
   BUYERS_PREMIUM,
   GRADERS,
-  DEFAULT_MAX_COPIES_PER_CARD,
+  DEFAULT_GRADER_COPY_CAPS,
   basisFromArgs,
   formatBasis,
   formatSalesRule,
@@ -1364,7 +1364,7 @@ export function notesSheet(now: Date, asked: Record<VenueKey, number>, funnels: 
     ["share curve", "A row per house, grader, band of the grid and rule tried: the lots in the band, what the rule would have won, what those cost, what they resell for and the profit and margin that leaves. The row marked best is the one the recommendation took; the \"as configured\" row is what the given table did in that band, worked out per lot. Fanatics and Alt are separate because each sniper takes its own table."],
     ["buckets", `all_in_pct in buckets from ${BUCKET_FROM}% to ${BUCKET_TO}% in steps of ${BUCKET_STEP}, with a bucket below and one above, cut by grader and by house — over the lots the table would have bid on.`],
     ["per auction", "Auctions is a row per auction and, where both graders turn up in it, one per grader inside it: there to show whether an answer is drifting rather than to be averaged."],
-    ["per card", `The snipers hold a few lots of one card at most per auction — ${DEFAULT_MAX_COPIES_PER_CARD} unless the run is told otherwise, whatever the grade or grader. The report does not apply that cap: it counts every lot a rule would have won.`],
+    ["per card", `The snipers bid on every copy of a card, except that they hold at most ${DEFAULT_GRADER_COPY_CAPS.CGC} CGC copies of one card at one grade per auction unless the run is told otherwise; PSA copies are uncapped. The report does not apply that cap: it counts every lot a rule would have won.`],
     ["credits", "None spent. Pricing is the free per-cert lookup; nothing is identified, bid on, or written anywhere."],
   ];
 }

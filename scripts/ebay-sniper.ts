@@ -142,6 +142,7 @@ import {
   nothingToBidOn,
   requireSomethingToBidOn,
   marketPct,
+  graderCopyCapsFromArgs,
   maxCopiesFromArgs,
   maxCopiesPerCard,
   openCardUploader,
@@ -507,6 +508,8 @@ export class Ledger {
     private readonly perCard: number,
     /** Lots to win before the run is over; 0 is as many as the budget allows. */
     readonly maxWins = 0,
+    /** A grader's own cap, counted per grade over its copies only — CGC 4 by default (graderCopyCapsFromArgs). */
+    private readonly perGrade: Record<string, number> = {},
   ) {}
 
   private items(): ItemRecord[] { return Object.values(this.state.items); }
@@ -537,6 +540,28 @@ export class Ledger {
   }
   capped(cardKey: string | undefined): boolean {
     return !!cardKey && this.copies(cardKey) >= this.perCard;
+  }
+
+  /** Copies of this card at this grader and grade in flight or won. */
+  gradeCopies(cardKey: string, grader: string, grade: number | undefined): number {
+    return this.items().filter((i) => i.cardKey === cardKey && i.grader === grader && i.grade === grade
+      && (HOLDING.includes(i.status) || SPENT.includes(i.status))).length;
+  }
+
+  /**
+   * Why this lot is over a copy cap, or null. `counted` is true when the lot
+   * is itself already in flight, so it does not count against its own room.
+   */
+  capReason(r: Pick<ItemRecord, "cardKey" | "grader" | "grade">, counted = false): string | null {
+    if (!r.cardKey) return null;
+    const self = counted ? 1 : 0;
+    if (this.copies(r.cardKey) - self >= this.perCard) return `per-card cap: ${this.perCard} of this card already in flight or won`;
+    const cap = r.grader === undefined ? undefined : this.perGrade[r.grader];
+    if (cap !== undefined && this.gradeCopies(r.cardKey, r.grader!, r.grade) - self >= cap) {
+      const at = r.grade === undefined ? r.grader : `${r.grader} ${r.grade}`;
+      return `per-card cap: ${cap} ${at} copies of this card already in flight or won`;
+    }
+    return null;
   }
 
   /** Why the run is over, or null while there is budget to spend. */
@@ -745,7 +770,7 @@ export async function runEbaySniper(): Promise<void> {
 
   const statePath = join(outDir, STATE_FILE);
   const state = loadState(statePath);
-  const ledger = new Ledger(state, budgetCents, maxCopiesPerCard(), maxWins);
+  const ledger = new Ledger(state, budgetCents, maxCopiesPerCard(), maxWins, graderCopyCapsFromArgs());
   const resumed = Object.keys(state.items).length;
 
   console.log(live
@@ -768,7 +793,9 @@ export async function runEbaySniper(): Promise<void> {
   for (const grader of GRADERS) say(`tiers ${grader}    ${formatTiers(tierTable()[grader])}`);
   const noTable = nothingToBidOn();
   if (noTable) say(`⚠️  ${noTable}`);
-  say(`per card     at most ${maxCopiesPerCard()} lot(s) of one card in flight or won`);
+  const gradeCaps = Object.entries(graderCopyCapsFromArgs()).map(([g, n]) => `${n} ${g}`).join(", ");
+  say(`per card     ${Number.isFinite(maxCopiesPerCard()) ? `at most ${maxCopiesPerCard()} lot(s) of one card in flight or won` : "every copy of a card"}` +
+    (gradeCaps ? `, ${Number.isFinite(maxCopiesPerCard()) ? "and " : "except "}at most ${gradeCaps} copies of it per grade` : ""));
   say(`sales rule   ${formatSalesRule()}`);
   say(`value basis  the ${formatBasis()} of them — no buyer's premium here, so the share is of the hammer`);
   say(`shipping     the listing's own postage comes off the bid, so hammer + postage stays under the max` +
@@ -1228,7 +1255,8 @@ export async function runEbaySniper(): Promise<void> {
         skip(r, `the win limit of ${ledger.maxWins} is taken up by what is won or already bid on`);
         return;
       }
-      if (r.cardKey && ledger.copies(r.cardKey) > maxCopiesPerCard()) { skip(r, `per-card cap: ${maxCopiesPerCard()} of this card already in flight or won`); return; }
+      const overCap = ledger.capReason(r, true);
+      if (overCap) { skip(r, overCap); return; }
       const fireAt = fireAtMs(endsAtMs, fireBeforeS);
 
       if (!live) {
