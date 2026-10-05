@@ -3447,7 +3447,11 @@ export async function runSniper(venue: Venue): Promise<void> {
   if (!Number.isInteger(maxCards) || maxCards < 0) throw new Error(`--max-cards must be a whole number, got "${opt("max-cards", "")}"`);
   const concurrency = Number(opt("concurrency", String(PRICE_CONCURRENCY)));
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error(`--concurrency must be a positive whole number, got "${opt("concurrency", "")}"`);
-  const batchSize = Number(opt("batch", String(DEFAULT_BATCH)));
+  // Priced by batch upload, a round of a thousand certs is five or more jobs
+  // and ten minutes or more, and the fire is only looked at between rounds —
+  // on 2026-10-04 that held the bids back past 7 PM. One upload's worth a
+  // round keeps the fire within a few minutes of its time.
+  const batchSize = Number(opt("batch", String(batchOnlyFromArgs() ? MAX_CERTS_PER_BATCH : DEFAULT_BATCH)));
   if (!Number.isInteger(batchSize) || batchSize < 1) throw new Error(`--batch must be a positive whole number, got "${opt("batch", "")}"`);
   const pollS = Number(opt("poll", String(DEFAULT_POLL_S)));
   if (!(pollS >= MIN_POLL_S)) throw new Error(`--poll must be at least ${MIN_POLL_S} seconds, got "${opt("poll", "")}"`);
