@@ -3627,7 +3627,8 @@ export async function runSniper(venue: Venue): Promise<void> {
           // Paid for once: a cert the batch could not resolve is not bought again.
           for (const c of take) batchTried.add(`${c.grader}:${c.cert}`);
           console.log(`    pricing ${take.length} cert(s) by batch upload  (~${take.length * 2} credits${Number.isFinite(batchPricingLimit) ? `, ${batchPricingLimit - batchPriced} of the --batch-pricing allowance left` : ""})`);
-          const before = take.filter((c) => !prices.get(`${c.grader}:${c.cert}`)?.error).length;
+          const pricedNow = (c: Candidate) => { const p = prices.get(`${c.grader}:${c.cert}`); return !!p && !p.error && p.sales.length > 0; };
+          const before = take.filter(pricedNow).length;
           try {
             await identifyViaBatch(cu, take, batchPrefix, { between: live ? pollBetween : undefined, prices });
           } catch (err) {
@@ -3639,8 +3640,8 @@ export async function runSniper(venue: Venue): Promise<void> {
               prices.set(key, { card: null, info: null, altValue: null, salesAverage: null, sales: [], attempts: PRICE_ATTEMPTS, error: "batch upload did not resolve the cert" });
             }
           }
-          const got = take.filter((c) => !prices.get(`${c.grader}:${c.cert}`)?.error).length - before;
-          console.log(`    batch-priced ${got} of ${take.length}`);
+          const got = take.filter(pricedNow).length - before;
+          console.log(`    batch-priced ${got} of ${take.length} (with at least one sale)`);
         } else if (unanswered.length > 0 && batchPricingLimit === 0 && rounds === 1) {
           const sample = prices.get(`${unanswered[0].grader}:${unanswered[0].cert}`)?.error;
           console.log(`    ${unanswered.length} cert(s) unanswered by the free lookup${sample ? ` (e.g. ${sample.slice(0, 160)})` : ""} — --batch-pricing=N would price up to N of them by batch upload, 2 credits each`);
