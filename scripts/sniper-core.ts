@@ -2725,10 +2725,17 @@ export function pricesFromJobCards(cards: JobCard[], grader: string): Map<string
 }
 
 /** How long a batch's sales may take to arrive after its identities have. */
-const BATCH_SALES_TIMEOUT_MS = 3 * 60_000;
+const BATCH_SALES_TIMEOUT_MS = 5 * 60_000;
 const BATCH_SALES_POLL_MS = 5_000;
-/** Reads in a row with no new card's sales before the batch counts as fully priced. */
-const BATCH_SALES_STABLE_POLLS = 3;
+/**
+ * Reads in a row with no new card's sales before the batch counts as done —
+ * once some have arrived. With none in yet it waits the whole timeout: the
+ * sales land a while after the job reports complete, and giving up on a quiet
+ * start (the 2026-10-04 run, after 15 s) priced nothing.
+ */
+const BATCH_SALES_STABLE_POLLS = 6;
+/** Done early once this share of the batch's cards has its sales. */
+const BATCH_SALES_ENOUGH = 0.95;
 
 /**
  * A finished batch's data, read again until its sales stop arriving. A card
@@ -2744,14 +2751,21 @@ async function waitForSales(session: CuSession, id: string, between?: () => Prom
   for (;;) {
     const data = await cuGet<JobData>(session.page, session.bearer, `/backend/jobs/${id}/data`);
     const cards = data.results?.cards ?? [];
-    const withSales = cards.filter((c) => Array.isArray(c.certPricing?.recentSales)).length;
-    if (cards.length > 0 && withSales === cards.length) return cards;
-    stable = withSales === last ? stable + 1 : 0;
-    last = withSales;
-    if (stable >= BATCH_SALES_STABLE_POLLS || Date.now() > deadline) {
-      console.log(`    sales in for ${withSales} of ${cards.length} card(s) — using what arrived`);
+    // A card counts once it has at least one sale: an empty list is the
+    // placeholder the batch starts with, not an answer.
+    const withSales = cards.filter((c) => (c.certPricing?.recentSales?.length ?? 0) > 0).length;
+    const fivePlus = cards.filter((c) => (c.certPricing?.recentSales?.length ?? 0) >= 5).length;
+    if (cards.length > 0 && withSales >= Math.ceil(cards.length * BATCH_SALES_ENOUGH)) {
+      console.log(`    sales: ${withSales} of ${cards.length} card(s) have sales, ${fivePlus} have 5+`);
       return cards;
     }
+    stable = withSales === last ? stable + 1 : 0;
+    last = withSales;
+    if ((withSales > 0 && stable >= BATCH_SALES_STABLE_POLLS) || Date.now() > deadline) {
+      console.log(`    sales: ${withSales} of ${cards.length} card(s) have sales, ${fivePlus} have 5+${Date.now() > deadline ? " — timed out waiting for the rest" : " — no more arriving"}`);
+      return cards;
+    }
+    if (stable === 0 || stable % 6 === 0) console.log(`    waiting for sales: ${withSales} of ${cards.length} card(s) so far`);
     if (between) await between();
     await sleep(BATCH_SALES_POLL_MS);
   }
