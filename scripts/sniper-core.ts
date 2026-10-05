@@ -3896,6 +3896,7 @@ export async function runSniper(venue: Venue): Promise<void> {
      * fire, or what the ceiling did not reach. Returns how many rows a re-scan
      * had found past the max, for the funnel.
      */
+    const listedInLog = new Set<string>();
     const writeOutputs = (final: boolean): number => {
       worthy.sort(byBidOrder);
       const placedBy = new Map(book.placed.map((b) => [b.listingId, b]));
@@ -3938,6 +3939,14 @@ export async function runSniper(venue: Venue): Promise<void> {
 
       // The one file worth keeping, and the page the Actions summary shows.
       writeFileSync(join(outDir, csvName), toCsv(worthy));
+      // The same list in the log, a line per lot the first time it is worth a
+      // bid: an Actions artifact only uploads once the job ends, and the links
+      // are wanted while it runs.
+      for (const row of worthy) {
+        if (!row.url || listedInLog.has(row.url)) continue;
+        listedInLog.add(row.url);
+        console.log(`    🔗 worth a bid: ${row.grader} ${row.grade}${row.grade_label ? ` ${row.grade_label}` : ""} · max $${row.max_bid_hammer} · market $${row.market_price} · ${row.title}\n       ${row.url}`);
+      }
       writeFileSync(join(outDir, "summary.md"), summaryMarkdown(worthy, rejected, onChaseList, lots.length,
         { venue: venue.name, csv: csvName, mode: held ? `${mode} — holding for the fire` : mode, standing: book.standing(), chaseList: chasing.length > 0, held }));
       if (!final) log("written", { held: queue, out: pricedOutCount });
