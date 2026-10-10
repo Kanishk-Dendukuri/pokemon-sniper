@@ -546,7 +546,25 @@ export class FanaticsSession implements Session {
     };
   }
 
-  /** Every bid on the account, in one request. */
+  /**
+   * Where the open bids begin in the account's list, as the last read found
+   * it: the cursor the page holding the first of them was asked for with —
+   * null for the first page. Null altogether until a read has found one.
+   */
+  private openBidsFrom: { after: string | null } | null = null;
+
+  /**
+   * The account's open bids, and whatever history shares their pages.
+   *
+   * The list is every weekly bid the account has ever placed — 4,543 of them
+   * on 2026-10-04, ten pages — and only the handful in the auction closing
+   * now are of any use to a run. They sit together, at one end of the list or
+   * the other, so a read that has found them remembers where they began and
+   * the next one starts there instead of at the top: a page or two a poll
+   * rather than all ten. A read that starts there and finds none has lost
+   * them — they have closed, or the list has moved — and forgets the place,
+   * so the read after it walks the whole list once more.
+   */
   async accountBids(): Promise<Map<string, AccountBid> | null> {
     type Data = {
       collectCurrentUserV2: {
@@ -563,41 +581,51 @@ export class FanaticsSession implements Session {
       } | null;
     };
     const bids = new Map<string, AccountBid>();
-    let after: string | null = null;
+    let after: string | null = this.openBidsFrom?.after ?? null;
+    let firstOpen: { after: string | null } | null = null;
     let seenOpen = false;
     let total = 0;
     let more = false;
-    for (let page = 1; page <= ACCOUNT_BIDS_PAGES; page++) {
-      const data: Data = await this.gql<Data>("webGetActiveAuctionsBidsQuery", ACTIVE_BIDS_QUERY, { listingTypes: ["WEEKLY"], first: ACCOUNT_BIDS_PAGE, after });
-      const listings = data.collectCurrentUserV2?.collectListings;
-      total = listings?.total ?? total;
-      let openHere = 0;
-      for (const { node } of listings?.edges ?? []) {
-        const status = node.auction?.status ?? "";
-        const open = !(node.states?.isClosed ?? false) && (status === "LIVE" || status === "EXTENDED_BIDDING" || status === "");
-        if (open) openHere++;
-        bids.set(node.id, {
-          listingId: node.id,
-          title: node.title ?? "",
-          lot: node.lotString ?? "",
-          maxCents: node.states?.userMaxBid?.amountInCents ?? 0,
-          status: asStatus(node.states?.userBidStatus),
-          closed: node.states?.isClosed ?? false,
-          currentBidCents: node.currentBid?.amountInCents ?? 0,
-          highestBidder: node.highestBidder ?? false,
-          auctionId: node.auction?.id ?? "",
-          auctionStatus: status,
-        });
+    try {
+      for (let page = 1; page <= ACCOUNT_BIDS_PAGES; page++) {
+        const askedWith = after;
+        const data: Data = await this.gql<Data>("webGetActiveAuctionsBidsQuery", ACTIVE_BIDS_QUERY, { listingTypes: ["WEEKLY"], first: ACCOUNT_BIDS_PAGE, after });
+        const listings = data.collectCurrentUserV2?.collectListings;
+        total = listings?.total ?? total;
+        let openHere = 0;
+        for (const { node } of listings?.edges ?? []) {
+          const status = node.auction?.status ?? "";
+          const open = !(node.states?.isClosed ?? false) && (status === "LIVE" || status === "EXTENDED_BIDDING" || status === "");
+          if (open) openHere++;
+          bids.set(node.id, {
+            listingId: node.id,
+            title: node.title ?? "",
+            lot: node.lotString ?? "",
+            maxCents: node.states?.userMaxBid?.amountInCents ?? 0,
+            status: asStatus(node.states?.userBidStatus),
+            closed: node.states?.isClosed ?? false,
+            currentBidCents: node.currentBid?.amountInCents ?? 0,
+            highestBidder: node.highestBidder ?? false,
+            auctionId: node.auction?.id ?? "",
+            auctionStatus: status,
+          });
+        }
+        more = listings?.pageInfo?.hasNextPage ?? false;
+        after = listings?.pageInfo?.endCursor ?? null;
+        // The open bids sit together in the list, whichever end it starts from.
+        // A page with none, after pages that had some, is the far side of them:
+        // nothing past it is a bid this run could be holding.
+        if (openHere > 0) { seenOpen = true; firstOpen ??= { after: askedWith }; }
+        else if (seenOpen) { more = false; }
+        if (!more || !after) break;
       }
-      more = listings?.pageInfo?.hasNextPage ?? false;
-      after = listings?.pageInfo?.endCursor ?? null;
-      // The open bids sit together in the list, whichever end it starts from.
-      // A page with none, after pages that had some, is the far side of them:
-      // nothing past it is a bid this run could be holding.
-      if (openHere > 0) seenOpen = true;
-      else if (seenOpen) { more = false; }
-      if (!more || !after) break;
+    } catch (err) {
+      // A cursor the list no longer honours is one way to end up here, so the
+      // place is forgotten and the next read starts from the top.
+      this.openBidsFrom = null;
+      throw err;
     }
+    this.openBidsFrom = firstOpen;
     // Ten pages and still more: the lots left out are quoted one by one by
     // the book, which is slow. Said once, loudly.
     if (more && !this.warnedTruncated) {

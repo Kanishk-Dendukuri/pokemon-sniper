@@ -4,6 +4,7 @@ import {
   BidBook,
   DEFAULT_BUDGET_DOLLARS,
   FANATICS_STEPS,
+  FanaticsSession,
   type Biddable,
   type PlacedBid,
   allInCents,
@@ -721,5 +722,145 @@ describe("the fire", () => {
     };
     const b = new BidBook(exchange, { budgetCents: 1_000_000, live: true, log: () => {} });
     await expect(b.fire(pool(8), { concurrency: 4 })).rejects.toThrow(/read as the account/);
+  });
+});
+
+/**
+ * The account is asked about its bids only while there is a bid to ask about.
+ * On 2026-10-04 a run holding nothing read an account's 4,543 past bids every
+ * five seconds, and Fanatics was answering 429 before the first bid went on.
+ */
+describe("a poll, and whether it reads the account", () => {
+  const counting = (account: () => Map<string, Record<string, unknown>> = () => new Map()) => {
+    const calls = { account: 0, clock: 0 };
+    const exchange = {
+      steps: FANATICS_STEPS,
+      listingUrl: (id: string) => id,
+      quote: async () => { throw new Error("the account-wide read answers for these lots"); },
+      accountBids: async () => { calls.account++; return account() as never; },
+      readAuction: async () => { calls.clock++; return null; },
+      sendBid: async () => ({ ok: true as const, bidId: null }),
+    };
+    return { exchange, calls };
+  };
+  const standing = (status: "HIGH_BID" | "OUTBID") => new Map([[ID_A, {
+    listingId: ID_A, title: "t", lot: "l", maxCents: 4_000, status, closed: false, currentBidCents: 3_000,
+    highestBidder: status === "HIGH_BID", auctionId: "1", auctionStatus: "LIVE",
+  }]]);
+  const bid = (over: Partial<PlacedBid> = {}): PlacedBid => ({
+    listingId: ID_A, title: "t", lot: "l", cents: 4_000, allInCents: 4_800, status: "HIGH_BID", closed: false, at: "2026-10-04T00:00:00Z", ...over,
+  });
+
+  test("with nothing on the books it reads the clock and leaves the account alone", async () => {
+    const { exchange, calls } = counting();
+    const b = new BidBook(exchange, { budgetCents: 10_000, live: true, log: () => {} });
+    await b.poll();
+    await b.poll();
+    expect(calls).toEqual({ account: 0, clock: 2 });
+  });
+
+  test("with a bid on it reads the account, and stops again once that bid is outbid", async () => {
+    let now: "HIGH_BID" | "OUTBID" = "HIGH_BID";
+    const { exchange, calls } = counting(() => standing(now));
+    const b = new BidBook(exchange, { budgetCents: 10_000, live: true, log: () => {} });
+    b.placed.push(bid());
+    await b.poll();
+    expect(calls.account).toBe(1);
+
+    now = "OUTBID";
+    const polled = await b.poll();
+    expect(calls.account).toBe(2);
+    expect(polled.freed).toBe(4_800);
+    // Nothing open any more: the next poll has nothing to ask the account.
+    await b.poll();
+    expect(calls).toEqual({ account: 2, clock: 3 });
+  });
+
+  test("a bid the account was already carrying is a bid to ask about", async () => {
+    const { exchange, calls } = counting(() => standing("HIGH_BID"));
+    const b = new BidBook(exchange, { budgetCents: 10_000, live: true, log: () => {} });
+    b.inherited.push(bid());
+    await b.poll();
+    expect(calls.account).toBe(1);
+    // …and one that has closed is not.
+    b.inherited[0].closed = true;
+    await b.poll();
+    expect(calls.account).toBe(1);
+  });
+});
+
+/**
+ * The account's list is every bid it has ever placed. A read that has found
+ * the open ones starts there the next time, instead of walking the history
+ * to reach them again.
+ */
+describe("the account's bids, a page at a time", () => {
+  const node = (id: string, open: boolean) => ({ node: {
+    id, title: id, lotString: id, highestBidder: open, currentBid: { amountInCents: 1_000 },
+    states: { userMaxBid: { amountInCents: 2_000 }, userBidStatus: open ? "HIGH_BID" : "OUTBID", isClosed: !open },
+    auction: { id: "1", status: open ? "LIVE" : "CLOSED" },
+  } });
+  /** A session whose list is these pages — true for an open bid — noting every cursor it is asked for. */
+  const over = (pages: boolean[][]) => {
+    const asked: (string | null)[] = [];
+    let failing = false;
+    const session = new FanaticsSession({} as never, {} as never);
+    (session as unknown as { gql: unknown }).gql = async (_name: string, _query: string, vars: { after: string | null }) => {
+      asked.push(vars.after);
+      if (failing) throw new Error("webGetActiveAuctionsBidsQuery: HTTP 429");
+      const i = vars.after === null ? 0 : Number(vars.after);
+      return { collectCurrentUserV2: { collectListings: {
+        edges: pages[i].map((open, n) => node(`p${i}-${n}`, open)),
+        pageInfo: { hasNextPage: i < pages.length - 1, endCursor: String(i + 1) },
+        total: pages.flat().length,
+      } } };
+    };
+    return { session, asked, fail: (on: boolean) => { failing = on; } };
+  };
+  const history = [false, false];
+
+  test("history first, open bids last: found once, and read from there afterwards", async () => {
+    const { session, asked } = over([history, history, history, [false, true, true]]);
+    const first = await session.accountBids();
+    expect(asked).toEqual([null, "1", "2", "3"]);
+    expect(first?.size).toBe(9);
+
+    asked.length = 0;
+    const second = await session.accountBids();
+    expect(asked).toEqual(["3"]);
+    expect([...second!.values()].filter((b) => !b.closed).map((b) => b.listingId)).toEqual(["p3-1", "p3-2"]);
+  });
+
+  test("open bids first: one page past them, and no further", async () => {
+    const { session, asked } = over([[true, true, false], history, history, history]);
+    await session.accountBids();
+    await session.accountBids();
+    expect(asked).toEqual([null, "1", null, "1"]);
+  });
+
+  test("when the open bids have gone from where they were, the list is walked once more", async () => {
+    const pages = [history, history, [true, true]];
+    const { session, asked } = over(pages);
+    await session.accountBids();
+    pages[2] = [false, false];
+    asked.length = 0;
+    // Read from the remembered place: the bids are there, closed, and none is open.
+    const closed = await session.accountBids();
+    expect(asked).toEqual(["2"]);
+    expect([...closed!.keys()]).toEqual(["p2-0", "p2-1"]);
+    asked.length = 0;
+    await session.accountBids();
+    expect(asked).toEqual([null, "1", "2"]);
+  });
+
+  test("a read that fails forgets the place rather than trusting it", async () => {
+    const { session, asked, fail } = over([history, history, [true]]);
+    await session.accountBids();
+    fail(true);
+    await expect(session.accountBids()).rejects.toThrow(/429/);
+    fail(false);
+    asked.length = 0;
+    await session.accountBids();
+    expect(asked).toEqual([null, "1", "2"]);
   });
 });

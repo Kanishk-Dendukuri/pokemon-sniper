@@ -1067,11 +1067,11 @@ export class BidBook {
    * Reads every open bid back and notes what changed.
    *
    * Two requests, whatever the number of bids: one for the auction's own clock,
-   * one for every bid on the account. Only a bid the account-wide read leaves
-   * out is asked about on its own, which in practice means one that has just
-   * closed. `changes` counts the standings that moved, which is what a run
-   * holding sixty bids for six hours uses to decide whether it has anything to
-   * say.
+   * one for every bid on the account — and the second only while there is a
+   * bid to ask about. Only a bid the account-wide read leaves out is asked
+   * about on its own, which in practice means one that has just closed.
+   * `changes` counts the standings that moved, which is what a run holding
+   * sixty bids for six hours uses to decide whether it has anything to say.
    */
   async poll(): Promise<{ auctionClosed: boolean; freed: number; changes: number; auction: AuctionState | null }> {
     if (!this.exchange) return { auctionClosed: false, freed: 0, changes: 0, auction: null };
@@ -1086,7 +1086,18 @@ export class BidBook {
     if (auction) this.auctionId = auction.id;
     let auctionClosed = auction?.status === "CLOSED";
 
-    const account = await this.accountBids();
+    // The account is only asked while there is a bid to ask it about: one of
+    // this run's still open, or one the account was already carrying. Before
+    // the fire a run holds nothing, and the read is then every bid the account
+    // has ever placed, for no answer at all. On 2026-10-04 an account with
+    // 4,543 past bids was read ten pages at a time, every five seconds from
+    // the moment extended bidding opened, and Fanatics was answering 429
+    // within fourteen seconds — nine minutes before the first bid went on.
+    // The clock above is still read every poll: it is one small request, and
+    // it is what moves the fire.
+    const open = this.placed.filter((b) => !b.closed && b.status !== "OUTBID" && b.status !== "PLANNED");
+    const carried = this.inherited.some((b) => !b.closed && b.status !== "OUTBID");
+    const account = open.length > 0 || carried ? await this.accountBids() : new Map<string, AccountBid>();
 
     // Whatever the account-wide read did not cover has to be asked about lot by
     // lot, and a big budget holds enough bids that doing all of them would turn
@@ -1094,7 +1105,6 @@ export class BidBook {
     // when the interval matters most. So a poll spends a fixed number of those
     // and starts where the last one stopped, which walks the whole list over a
     // few polls instead of stalling on one.
-    const open = this.placed.filter((b) => !b.closed && b.status !== "OUTBID" && b.status !== "PLANNED");
     const missing = account ? open.filter((b) => !account.has(b.listingId)) : open;
     const quotable = new Set<string>();
     if (missing.length > 0) {
