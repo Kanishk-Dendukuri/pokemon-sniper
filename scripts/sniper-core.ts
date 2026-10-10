@@ -224,7 +224,7 @@
 
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page, type Request as PageRequest, type Response as PageResponse } from "playwright";
 import {
   BASE as CU_BASE,
   HISTORY_URL as CU_HISTORY_URL,
@@ -2267,10 +2267,15 @@ export type JobCard = {
   price?: string | number | null;
   /** Keyed by grader in lower case — `pricing.cgc.currentAltValue`. */
   pricing?: Record<string, { currentAltValue?: number | null } | null | undefined> | null;
-  /** The last sale and the five newest sales, which arrive after the identity does. */
+  /**
+   * The five newest sales, as the batch's window shows them under the card.
+   * Not there until the window has been opened — see waitForSales.
+   */
   certPricing?: {
     recentSales?: { price?: number | string | null; date?: string | null; platform?: string | null; url?: string | null }[] | null;
   } | null;
+  /** When the window finished pricing this card; absent on one it has not, or could not. */
+  pricingFetchedAt?: string | null;
 };
 
 type JobData = { results?: { cards?: JobCard[] | null } | null };
@@ -2365,6 +2370,7 @@ export function isFinalAnswer(message: string): boolean {
   const status = Number(/\bHTTP (\d{3})\b/.exec(message)?.[1] ?? 0);
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
+
 
 /**
  * A signed-in Card Uploader tab, shared by the two stages that need one.
@@ -2724,50 +2730,135 @@ export function pricesFromJobCards(cards: JobCard[], grader: string): Map<string
   return out;
 }
 
-/** How long a batch's sales may take to arrive after its identities have. */
-const BATCH_SALES_TIMEOUT_MS = 5 * 60_000;
-const BATCH_SALES_POLL_MS = 5_000;
-/**
- * Reads in a row with no new card's sales before the batch counts as done —
- * once some have arrived. With none in yet it waits the whole timeout: the
- * sales land a while after the job reports complete, and giving up on a quiet
- * start (the 2026-10-04 run, after 15 s) priced nothing.
- */
-const BATCH_SALES_STABLE_POLLS = 6;
-/** Done early once this share of the batch's cards has its sales. */
-const BATCH_SALES_ENOUGH = 0.95;
+/** A batch's own page: the window a person reads its cards in. */
+export function batchWindowUrl(id: string): string {
+  return `${CU_BASE}/dashboard/history/graded/${encodeURIComponent(id)}`;
+}
 
 /**
- * A finished batch's data, read again until its sales stop arriving. A card
- * resolves from its cert before its sales do — separate fetches on Card
- * Uploader's side — so the first read after the job completes can be missing
- * most of them. Done when every card has its sales, or the count has held
- * still for a few reads, or the time is up; whatever is in by then is used.
+ * How long a batch's window is given to price its cards: this much, and
+ * BATCH_SALES_MS_PER_CARD on top for every card in it. The window asks for
+ * three cards at a time, and a CGC card is the slow kind — its Alt Value is
+ * read off the slab's photograph. On 2026-10-10 a 200-card CGC batch had its
+ * last card priced 265 s after it was made and a 41-card PSA batch 11 s
+ * after; 200 cards are given twelve minutes.
+ */
+const BATCH_SALES_TIMEOUT_MS = 2 * 60_000;
+const BATCH_SALES_MS_PER_CARD = 3_000;
+const BATCH_SALES_POLL_MS = 5_000;
+/**
+ * How long the window may have no price lookup in flight, having made some,
+ * before it counts as finished: it saves the moment the last one answers, so
+ * whatever the batch's data holds a few reads later is all it is going to.
+ */
+const BATCH_WINDOW_IDLE_MS = 15_000;
+/** A window that has asked for no price at all this long after opening is opened once more. */
+const BATCH_WINDOW_QUIET_MS = 45_000;
+/**
+ * A price lookup, among everything else the window asks its backend for:
+ * /graded-pricing/cardladder for the sales and /graded-pricing/alt-by-cert or
+ * alt-by-image for the Alt Value, as of 2026-10-10. Read loosely, since they
+ * have been renamed before and are only watched to tell working from idle.
+ */
+const BATCH_WINDOW_LOOKUP = /\/backend\/[^?]*(?:pric|cardladder|alt-by)/i;
+/**
+ * Reads in a row with no newly priced card before a batch counts as done,
+ * where the window's own lookups cannot be seen to say so.
+ */
+const BATCH_SALES_STABLE_POLLS = 6;
+
+/**
+ * Opens a finished batch's window, and reads its cards once the window has
+ * priced them.
+ *
+ * Card Uploader does not price a batch; the batch's page does. A job that
+ * reports complete has identified its cards and nothing more, and stays that
+ * way for as long as nobody looks at it. The page, on loading, asks for each
+ * card's recent sales and its Alt Value itself, shows them under the card —
+ * "LAST SALE" and the five sales beneath it — and saves them back to the
+ * batch. Checked on 2026-10-10 with a three-cert batch: nothing priced with
+ * the window shut, all three within ten seconds of opening it. The run of
+ * 2026-10-04 never opened one, and 38 of its 40 batches came back without a
+ * sale between them.
+ *
+ * So the window is opened and the batch's data read until every card in it
+ * is priced. The window's own lookups are watched too, for one thing: to know
+ * when it has stopped. The data says little while it works, and a card whose
+ * lookup failed is never marked, so "it has finished asking" is what ends the
+ * wait on a batch that will not come back whole. What is read is the batch's
+ * data and never the lookups themselves, so one that moves again — as the
+ * per-cert price did on 2026-10-04 — changes nothing here.
  */
 async function waitForSales(session: CuSession, id: string, between?: () => Promise<void>): Promise<JobCard[]> {
-  const deadline = Date.now() + BATCH_SALES_TIMEOUT_MS;
-  let last = -1;
-  let stable = 0;
-  for (;;) {
-    const data = await cuGet<JobData>(session.page, session.bearer, `/backend/jobs/${id}/data`);
-    const cards = data.results?.cards ?? [];
-    // A card counts once it has at least one sale: an empty list is the
-    // placeholder the batch starts with, not an answer.
-    const withSales = cards.filter((c) => (c.certPricing?.recentSales?.length ?? 0) > 0).length;
-    const fivePlus = cards.filter((c) => (c.certPricing?.recentSales?.length ?? 0) >= 5).length;
-    if (cards.length > 0 && withSales >= Math.ceil(cards.length * BATCH_SALES_ENOUGH)) {
-      console.log(`    sales: ${withSales} of ${cards.length} card(s) have sales, ${fivePlus} have 5+`);
-      return cards;
+  const { page } = session;
+  let asked = 0;
+  let inFlight = 0;
+  let lastLookupMs = Date.now();
+  const isLookup = (request: PageRequest) => BATCH_WINDOW_LOOKUP.test(request.url());
+  const onAsk = (request: PageRequest) => { if (isLookup(request)) { asked++; inFlight++; lastLookupMs = Date.now(); } };
+  const onAnswer = (request: PageRequest) => { if (isLookup(request)) { inFlight = Math.max(0, inFlight - 1); lastLookupMs = Date.now(); } };
+  // Card Uploader limits how many lookups an account may make: on 2026-10-10
+  // it began answering 429 after some 3,000 in a few minutes, and was still
+  // answering it eight minutes on. A card refused that way comes back with no
+  // sales and nothing else to show for it, so the refusals are counted here
+  // and said out loud.
+  let refused = 0;
+  const onResponse = (response: PageResponse) => { if (response.status() === 429 && BATCH_WINDOW_LOOKUP.test(response.url())) refused++; };
+  const open = async () => {
+    // Whatever was in flight goes with the page it was asked from.
+    inFlight = 0;
+    await page.goto(batchWindowUrl(id), { waitUntil: "domcontentloaded", timeout: CU_REQUEST_TIMEOUT_MS })
+      .catch((err: unknown) => console.warn(`    ⚠️  the batch window would not open (${err instanceof Error ? err.message.split("\n")[0] : err})`));
+  };
+
+  page.on("request", onAsk);
+  page.on("requestfinished", onAnswer);
+  page.on("requestfailed", onAnswer);
+  page.on("response", onResponse);
+  try {
+    await open();
+    const started = Date.now();
+    let reopened = false;
+    let last = -1;
+    let stable = 0;
+    for (let read = 1; ; read++) {
+      const data = await cuGet<JobData>(page, session.bearer, `/backend/jobs/${id}/data`);
+      const cards = data.results?.cards ?? [];
+      // The window's own mark on a card it has finished with: its sales
+      // answered — five, fewer or none — and its Alt Value settled.
+      const priced = cards.filter((c) => !!c.pricingFetchedAt).length;
+      const withSales = cards.filter((c) => (c.certPricing?.recentSales?.length ?? 0) > 0).length;
+      const fivePlus = cards.filter((c) => (c.certPricing?.recentSales?.length ?? 0) >= 5).length;
+      const done = (why: string) => {
+        console.log(`    sales: ${withSales} of ${cards.length} card(s) have sales, ${fivePlus} have 5+${why}`);
+        if (refused > 0) console.warn(`    ⚠️  Card Uploader refused ${refused} of the window's lookup(s) as rate limited (HTTP 429) — those cards have no sales`);
+        return cards;
+      };
+      stable = priced === last ? stable + 1 : 0;
+      last = priced;
+
+      if (cards.length > 0 && priced === cards.length) return done("");
+      // Nothing in flight for a while, or nothing asked or answered for a
+      // long while: either way the window is not going to price any more.
+      const quietMs = Date.now() - lastLookupMs;
+      const finished = asked > 0 && quietMs >= (inFlight === 0 ? BATCH_WINDOW_IDLE_MS : 4 * BATCH_WINDOW_IDLE_MS);
+      if (finished && stable >= 2) return done(` — the window priced ${priced} and stopped`);
+      if (asked === 0 && priced > 0 && stable >= BATCH_SALES_STABLE_POLLS) return done(" — no more arriving");
+      if (Date.now() - started > BATCH_SALES_TIMEOUT_MS + cards.length * BATCH_SALES_MS_PER_CARD) return done(" — timed out waiting for the window");
+      if (!reopened && asked === 0 && priced === 0 && Date.now() - started >= BATCH_WINDOW_QUIET_MS) {
+        reopened = true;
+        console.warn(`    ⚠️  the batch window has asked for no price in ${Math.round((Date.now() - started) / 1000)}s — opening it again`);
+        await open();
+      }
+      if (read % 6 === 0) console.log(`    the batch window is pricing: ${asked} lookup(s) asked for, ${inFlight} in flight`);
+      if (between) await between();
+      await sleep(BATCH_SALES_POLL_MS);
     }
-    stable = withSales === last ? stable + 1 : 0;
-    last = withSales;
-    if ((withSales > 0 && stable >= BATCH_SALES_STABLE_POLLS) || Date.now() > deadline) {
-      console.log(`    sales: ${withSales} of ${cards.length} card(s) have sales, ${fivePlus} have 5+${Date.now() > deadline ? " — timed out waiting for the rest" : " — no more arriving"}`);
-      return cards;
-    }
-    if (stable === 0 || stable % 6 === 0) console.log(`    waiting for sales: ${withSales} of ${cards.length} card(s) so far`);
-    if (between) await between();
-    await sleep(BATCH_SALES_POLL_MS);
+  } finally {
+    page.off("request", onAsk);
+    page.off("requestfinished", onAnswer);
+    page.off("requestfailed", onAnswer);
+    page.off("response", onResponse);
   }
 }
 
@@ -2788,9 +2879,9 @@ export async function identifyViaBatch(
   opts: {
     between?: () => Promise<void>;
     /**
-     * Price off the batch as well: wait for each card's sales to arrive and
-     * put the identity, the Alt Value and the sales here. What the run uses
-     * when the free per-cert lookup will not answer.
+     * Price off the batch as well: open its window, wait for the window to
+     * price each card, and put the identity, the Alt Value and the five sales
+     * it shows here. What a run prices by unless it asks for the free lookup.
      */
     prices?: Map<string, CuPrice>;
   } = {},
@@ -3519,7 +3610,7 @@ export async function runSniper(venue: Venue): Promise<void> {
     (graderCaps.length > 0 ? `, ${Number.isFinite(maxCopiesPerCard()) ? "and " : "except "}at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} copies of it per grade` : ""));
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
   console.log(`    batch price  ${batchOnly
-    ? `every candidate priced by batch upload, the free lookup skipped${Number.isFinite(batchPricingLimit) ? ` — up to ${batchPricingLimit} cert(s), ~${batchPricingLimit * 2} credits at most` : " — 2 credits a cert, no cap"}`
+    ? `every candidate uploaded as a Card Uploader batch, its last five sales read off the batch's window${Number.isFinite(batchPricingLimit) ? ` — up to ${batchPricingLimit} cert(s), ~${batchPricingLimit * 2} credits at most` : " — 2 credits a cert, no cap"}`
     : batchPricingLimit > 0
       ? `up to ${Number.isFinite(batchPricingLimit) ? batchPricingLimit : "every"} cert(s) the free lookup will not answer are priced by batch upload, 2 credits each`
       : "off — a cert the free lookup will not answer goes unpriced (--batch-pricing=N to buy up to N)"}`);
