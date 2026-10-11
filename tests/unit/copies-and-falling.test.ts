@@ -1,6 +1,6 @@
 /**
- * Two rules about what is left alone: a card the auction holds too many
- * copies of, and a card whose price is falling.
+ * Two rules: a card the auction holds too many copies of is left alone, and
+ * a card whose newest sale is its lowest is valued off its 2nd lowest sale.
  */
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { CardCaps } from "@/scripts/sniper-book";
@@ -8,8 +8,10 @@ import {
   DEFAULT_BASIS,
   DEFAULT_SALES_RULE,
   copySupply,
+  FALLING_BASIS,
   fallingCheckFromArgs,
-  fallingReason,
+  fallingSale,
+  formatBasis,
   newestIsLowest,
   parseBasis,
   parseTiers,
@@ -68,59 +70,87 @@ describe("the newest sale being the lowest", () => {
 });
 
 describe("a falling card at the bid", () => {
+  // Newest first: $20 yesterday is the lowest of the five, $26 the 2nd lowest.
   const falling = [sale(20, 1), sale(26, 8), sale(28, 12), sale(30, 20), sale(32, 30)];
   const steady = [sale(26, 1), sale(20, 8), sale(28, 12), sale(30, 20), sale(32, 30)];
+  const dear = [sale(200, 1), sale(260, 8), sale(280, 12), sale(300, 20), sale(320, 30)];
+  const dearSteady = [sale(260, 1), sale(200, 8), sale(280, 12), sale(300, 20), sale(320, 30)];
 
-  test("priced off the 2nd lowest, it is left alone; the same sales in another order are bid on", () => {
-    setFallingCheck(true);
-    expect(quoteBand("PSA", 26, evidence(falling))).toEqual({
-      ok: false,
-      reason: "the most recent of its 5 sales, $20, is also the lowest — the price is falling, so the lot is left alone",
-    });
-    const bid = quoteBand("PSA", 26, evidence(steady));
-    expect(bid).toMatchObject({ ok: true, quote: { price: 26, rule: "75% all-in" } });
+  test("it is valued off the 2nd lowest", () => {
+    expect(formatBasis(FALLING_BASIS)).toBe("2nd lowest");
   });
 
-  test("only where the 2nd lowest is the basis: a run on another basis is priced as it asked", () => {
+  test("a band on the 2nd lowest is bid on as written, falling or not", () => {
+    setFallingCheck(true);
+    for (const sales of [falling, steady]) {
+      expect(quoteBand("PSA", 26, evidence(sales))).toMatchObject({
+        ok: true,
+        quote: { price: 26, rule: "75% all-in", via: "2nd lowest of 5 sale(s) inside 60d" },
+      });
+    }
+  });
+
+  test("a band on the lowest steps up to the 2nd lowest when the newest sale is the lowest, and says so", () => {
+    setFallingCheck(true);
+    expect(quoteBand("PSA", 260, evidence(dear))).toMatchObject({
+      ok: true,
+      quote: {
+        price: 260,
+        rule: "65% all-in",
+        via: "2nd lowest of 5 sale(s) inside 60d — not the lowest: the newest sale, $200, is the lowest",
+      },
+    });
+    // The same five sales with the lowest a week old: the band is priced as written.
+    expect(quoteBand("PSA", 260, evidence(dearSteady))).toMatchObject({
+      ok: true,
+      quote: { price: 200, via: "lowest of 5 sale(s) inside 60d" },
+    });
+  });
+
+  test("whatever basis the run or the band names, a falling card comes to the 2nd lowest", () => {
     setFallingCheck(true);
     for (const basis of ["lowest", "3rd lowest", "average of the 3 lowest", "median", "average"]) {
       setBasis(parseBasis(basis));
-      expect(quoteBand("PSA", 26, evidence(falling)), basis).toMatchObject({ ok: true });
+      const bid = quoteBand("PSA", 26, evidence(falling));
+      expect(bid, basis).toMatchObject({ ok: true, quote: { price: 26 } });
+      expect(bid.ok && bid.quote.via, basis).toBe(`2nd lowest of 5 sale(s) inside 60d — not the ${basis}: the newest sale, $20, is the lowest`);
+      // And a card that is not falling is priced on the basis asked for.
+      expect(quoteBand("PSA", 26, evidence(steady)), basis).toMatchObject({ ok: true, quote: { via: `${basis} of 5 sale(s) inside 60d` } });
     }
-    setBasis(parseBasis("2nd lowest"));
-    expect(quoteBand("PSA", 26, evidence(falling))).toMatchObject({ ok: false });
   });
 
-  test("a band that names its own basis is judged by that one, not the run's", () => {
+  test("a tie for the lowest is priced at it: the 2nd lowest is the same figure", () => {
     setFallingCheck(true);
-    const dear = [sale(200, 1), sale(260, 8), sale(280, 12), sale(300, 20), sale(320, 30)];
-    // The $100-1000 band prices off the lowest, so a run on the 2nd lowest still bids there…
-    expect(quoteBand("PSA", 260, evidence(dear))).toMatchObject({ ok: true, quote: { price: 200 } });
-    // …and a band that names the 2nd lowest is judged on a run that does not.
-    setBasis(parseBasis("median"));
-    setTierTable({ PSA: parseTiers("$1-100: 75% of 2nd lowest"), CGC: TIERS_OFF });
-    expect(quoteBand("PSA", 26, evidence(falling))).toMatchObject({ ok: false });
+    const tied = [sale(200, 1), sale(200, 8), sale(280, 12), sale(300, 20), sale(320, 30)];
+    expect(quoteBand("PSA", 200, evidence(tied))).toMatchObject({ ok: true, quote: { price: 200 } });
   });
 
   test("off unless a run turns it on, and a run turns it on unless told not to", () => {
-    expect(quoteBand("PSA", 26, evidence(falling))).toMatchObject({ ok: true });
+    expect(quoteBand("PSA", 260, evidence(dear))).toMatchObject({ ok: true, quote: { price: 200, via: "lowest of 5 sale(s) inside 60d" } });
+    expect(fallingSale(evidence(dear), dear)).toBeNull();
     expect(fallingCheckFromArgs({})).toBe(true);
-    expect(fallingCheckFromArgs({ ALLOW_FALLING: "" })).toBe(true);
-    expect(fallingCheckFromArgs({ ALLOW_FALLING: "1" })).toBe(false);
-    expect(fallingCheckFromArgs({ ALLOW_FALLING: "true" })).toBe(false);
+    expect(fallingCheckFromArgs({ BASIS_AS_WRITTEN: "" })).toBe(true);
+    expect(fallingCheckFromArgs({ BASIS_AS_WRITTEN: "1" })).toBe(false);
+    expect(fallingCheckFromArgs({ BASIS_AS_WRITTEN: "true" })).toBe(false);
   });
 
   test("the backtest sets the lot's own sale aside first, so a lot that went cheap is not a card falling", () => {
     setFallingCheck(true);
-    // The lot itself sold for $20 yesterday; before it, the newest sale was $28 and the lowest $26.
-    const own = sale(20, 1);
-    const wentCheap = [own, sale(28, 8), sale(26, 12), sale(30, 20), sale(32, 30)];
-    expect(fallingReason(evidence(wentCheap), wentCheap)).toMatch(/price is falling/);
-    expect(fallingReason(evidence(wentCheap, { omit: (s) => s === own }), wentCheap)).toBeNull();
-    // With it set aside the next newest is judged: $22 a week ago, under everything older.
-    const stillFalling = [own, sale(22, 8), sale(28, 12), sale(30, 20), sale(32, 30)];
-    expect(fallingReason(evidence(stillFalling, { omit: (s) => s === own }), stillFalling))
-      .toMatch(/the most recent of its 4 sales, \$22, is also the lowest/);
+    // The lot itself sold for $200 yesterday; before it, the newest sale was $280 and the lowest $260.
+    const own = sale(200, 1);
+    const wentCheap = [own, sale(280, 8), sale(260, 12), sale(300, 20), sale(320, 30)];
+    expect(fallingSale(evidence(wentCheap), wentCheap)?.price).toBe(200);
+    expect(fallingSale(evidence(wentCheap, { omit: (s) => s === own }), wentCheap)).toBeNull();
+    // So the band is priced as written, off the lowest of the four that are left.
+    expect(quoteBand("PSA", 260, evidence(wentCheap, { omit: (s) => s === own })))
+      .toMatchObject({ ok: true, quote: { price: 260, via: "lowest of 4 sale(s) inside 60d" } });
+    // With it set aside the next newest is judged: $220 a week ago, under everything older.
+    const stillFalling = [own, sale(220, 8), sale(280, 12), sale(300, 20), sale(320, 30)];
+    expect(fallingSale(evidence(stillFalling, { omit: (s) => s === own }), stillFalling)?.price).toBe(220);
+    expect(quoteBand("PSA", 280, evidence(stillFalling, { omit: (s) => s === own }))).toMatchObject({
+      ok: true,
+      quote: { price: 280, via: "2nd lowest of 4 sale(s) inside 60d — not the lowest: the newest sale, $220, is the lowest" },
+    });
   });
 });
 

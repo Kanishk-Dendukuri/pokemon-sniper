@@ -128,11 +128,13 @@ bid or not. PSA has no limit unless the box gives it one, and a bare number
 (`6, CGC 4`) limits the card across both graders. The run lists each card it
 left alone for this before the bids go on.
 
-**A falling card is left alone.** A lot priced off the 2nd lowest sale is
-passed over when its most recent sale is also its lowest: the lowest is then
-the news rather than a bad comp. It applies only where the 2nd lowest is the
-basis — the value basis box, or a band that names it — and any other basis is
-priced as it asked. `--allow-falling` (`ALLOW_FALLING=1`) turns it off.
+**A falling card is valued off its 2nd lowest sale.** When a card's most
+recent sale is also its lowest, the lot is priced off the 2nd lowest of its
+sales, whatever basis its band names. A band already on the 2nd lowest is
+priced as written; a band on the lowest steps up to the 2nd lowest, so the one
+newest sale does not set the value alone. The `priced_by` column says so
+wherever it changed the price. `--basis-as-written` (`BASIS_AS_WRITTEN=1`)
+turns it off.
 
 **A private rule can leave lots out.** Every box above is printed in the run's
 header, and the header is public for as long as the repository is. A rule in

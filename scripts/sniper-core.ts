@@ -195,12 +195,13 @@
  *                         for a workflow input, --max-copies-cgc /
  *                         --max-copies-psa set one grader's alone. Default:
  *                         no card-wide cap, CGC 4 per grade, PSA uncapped
- *   --allow-falling       bid on a lot even when its most recent sale is also
- *                         its lowest. Left alone, a lot priced off the 2nd
- *                         lowest is passed over when that is so: the lowest
- *                         is then the news rather than a bad comp, and the
- *                         price is falling (ALLOW_FALLING=1 for a workflow).
- *                         Any other basis is priced as it asked
+ *   --basis-as-written    price every band off the basis it names, even when
+ *                         the card's most recent sale is also its lowest.
+ *                         Left alone, such a lot is valued off its 2nd lowest
+ *                         sale whatever its band says: a band on the 2nd
+ *                         lowest is priced as written, a band on the lowest
+ *                         steps up to the 2nd lowest (BASIS_AS_WRITTEN=1 for
+ *                         a workflow)
  *   --count-existing-bids charge the bids already on the account to --budget:
  *                         a $2,000 run finding $600 of open bids on the
  *                         account has $1,400 to spend, not $2,000. Those lots
@@ -1852,14 +1853,10 @@ export function bandBasis(key: TierKey, ev: PriceEvidence, table: TierTable = ti
  * The sale that says a card's price is falling: its most recent one, when
  * that is also its cheapest.
  *
- * The bid is worked from the second-lowest of five sales because the lowest
- * is so often one bad comp. When the lowest is the newest of them it is not a
- * bad comp, it is the news: the card has just sold for less than it has in
- * weeks, and a bid priced off the sales before it is priced off a market that
- * has moved. Null when the newest sale is not the lowest, when there are not
- * two sales to compare, or when every sale was at one price — a card holding
- * still, not falling. Sales dated to the same moment are taken together, and
- * the cheapest of them is the newest.
+ * Null when the newest sale is not the lowest, when there are not two sales
+ * to compare, or when every sale was at one price — a card holding still, not
+ * falling. Sales dated to the same moment are taken together, and the
+ * cheapest of them is the newest.
  */
 export function newestIsLowest(sales: Sale[]): Sale | null {
   const priced = sales.filter((sale) => sale.price > 0 && Number.isFinite(new Date(sale.date).getTime()));
@@ -1874,54 +1871,56 @@ export function newestIsLowest(sales: Sale[]): Sale | null {
 }
 
 /**
- * Whether a lot priced off the second-lowest sale is left alone when its
- * newest sale is its lowest. Off here, so the arithmetic reads the same to
- * anything that only wants a price; a run turns it on unless it is told not
- * to — see fallingCheckFromArgs.
+ * What a card whose newest sale is its lowest is valued off: its second
+ * lowest sale, whatever basis its band names.
+ *
+ * A band already on the second lowest is priced exactly as written. A band on
+ * the lowest steps up to the second lowest, so the one newest sale does not
+ * set the value alone; a band on anything else comes to it too. Until
+ * 2026-10-11 such a lot was left alone instead, and only where the basis was
+ * the second lowest.
+ */
+export const FALLING_BASIS: BasisRule = { kind: "nth-lowest", n: 2 };
+
+/**
+ * Whether a lot whose newest sale is its lowest is valued off FALLING_BASIS.
+ * Off here, so the arithmetic reads the same to anything that only wants a
+ * price; a run turns it on unless it is told not to — see
+ * fallingCheckFromArgs.
  */
 let activeFallingCheck = false;
 
-/** Whether a falling card is passed over. */
+/** Whether a card whose newest sale is its lowest is valued off the second lowest. */
 export function fallingCheck(): boolean {
   return activeFallingCheck;
 }
 
-/** Pass falling cards over from now on, or stop. */
+/** Value falling cards off the second lowest from now on, or stop. */
 export function setFallingCheck(on: boolean): void {
   activeFallingCheck = on;
 }
 
 /**
- * On unless the run says otherwise: --allow-falling, or ALLOW_FALLING=1 in
- * the environment, bids on a card whose most recent sale is its lowest like
- * any other. It only ever bites where the basis is the second-lowest.
+ * On unless the run says otherwise: --basis-as-written, or BASIS_AS_WRITTEN=1
+ * in the environment, prices every band off the basis it names even when the
+ * card's most recent sale is its lowest.
  */
 export function fallingCheckFromArgs(env: Record<string, string | undefined> = process.env): boolean {
-  if (process.argv.includes("--allow-falling")) return false;
-  return !/^(1|true|yes)$/i.test((env.ALLOW_FALLING ?? "").trim());
+  if (process.argv.includes("--basis-as-written")) return false;
+  return !/^(1|true|yes)$/i.test((env.BASIS_AS_WRITTEN ?? "").trim());
 }
 
 /**
- * Why a lot is left alone for a falling price, judged on the sales it would
- * be priced from; null when it is not falling, or when the check is off.
- *
- * Only a lot priced off the second-lowest sale is judged at all. That basis
- * is the one that throws the lowest sale out as a bad comp, so it is the one
- * that is wrong when the lowest is the newest; a run or a band that picked
- * another basis — the lowest itself, an average, the median — has said how it
- * wants the cheap end read, and is priced as it asked.
+ * The newest sale of a lot, when it is also the lowest of the sales the lot
+ * would be priced from — the lot is then valued off FALLING_BASIS. Null when
+ * it is not, or when the check is off.
  *
  * A sale the evidence leaves out — the backtest's own-sale rule — is left out
  * here too, or every lot that went cheap would read as a card falling.
  */
-export function fallingReason(ev: PriceEvidence, used: Sale[], basis: BasisRule = basisRule()): string | null {
+export function fallingSale(ev: PriceEvidence, used: Sale[]): Sale | null {
   if (!fallingCheck()) return null;
-  if (!(basis.kind === "nth-lowest" && basis.n === 2)) return null;
-  const kept = ev.omit ? used.filter((sale) => !ev.omit!(sale)) : used;
-  const newest = newestIsLowest(kept);
-  return newest
-    ? `the most recent of its ${kept.length} sales, $${newest.price}, is also the lowest — the price is falling, so the lot is left alone`
-    : null;
+  return newestIsLowest(ev.omit ? used.filter((sale) => !ev.omit!(sale)) : used);
 }
 
 /** What a band bid, and the price it bid on. */
@@ -1969,12 +1968,17 @@ export function quoteBand(key: TierKey, price: number, ev: PriceEvidence, table:
       rule = { kind: "share", share: band.fallback.share };
       via = `alt value — ${short}`;
     } else {
-      const falling = fallingReason(ev, window, basis);
-      if (falling) return { ok: false, reason: falling };
-      const found = applyBasis(basis, used);
+      // A card whose newest sale is its lowest is valued off the second
+      // lowest, whatever the band names — see FALLING_BASIS.
+      const newest = fallingSale(ev, window);
+      const priced = newest ? FALLING_BASIS : basis;
+      const found = applyBasis(priced, used);
       if (found === null) return { ok: false, reason: `no priced sales inside ${sales.windowDays}d` };
       worked = found;
-      via = `${formatBasis(basis)} of ${used.length} sale(s) inside ${sales.windowDays}d`;
+      via = `${formatBasis(priced)} of ${used.length} sale(s) inside ${sales.windowDays}d`;
+      if (newest && formatBasis(priced) !== formatBasis(basis)) {
+        via += ` — not the ${formatBasis(basis)}: the newest sale, $${newest.price}, is the lowest`;
+      }
     }
   }
 
@@ -3849,8 +3853,8 @@ export async function runSniper(venue: Venue): Promise<void> {
       : "off — a cert the free lookup will not answer goes unpriced (--batch-pricing=N to buy up to N)"}`);
   console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);
   console.log(`    falling      ${fallingCheck()
-    ? "where the basis is the 2nd lowest, a lot whose most recent sale is also its lowest is left alone"
-    : "off (--allow-falling): a lot is bid on even when its most recent sale is its lowest"}`);
+    ? `a lot whose most recent sale is also its lowest is valued off the ${formatBasis(FALLING_BASIS)}, whatever basis its band names`
+    : "off (--basis-as-written): every band is priced off the basis it names, even when the most recent sale is the lowest"}`);
   if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
   if (wantEmail) console.log(`    account      ${wantEmail}`);
   console.log();
