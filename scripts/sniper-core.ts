@@ -2362,7 +2362,6 @@ export function selectCandidates(
   log(chaseList
     ? `    dropped: ${dropped.noMatch} off the chase list (${chasing.join(" and ")} only), ${dropped.noCert} without a cert`
     : `    dropped: ${dropped.noCert} without a cert (no chase list here: every PSA/CGC lot is a candidate)`);
-  if (dropped.excluded > 0) log(`    excluded: ${dropped.excluded} by a private rule — set outside the repository, and not listed here`);
   log(`    rejected: ${blockedTotal} on the block list` +
     (blockedTotal > 0 ? ` (${byCount.map(([p, n]) => `${n} ${p}`).join(", ")})` : "") +
     `, ${dropped.ungraded} CGC slabs with no number grade, ${dropped.noNumber} with no card number, ${dropped.offGrade} outside the grade range` +
@@ -3834,9 +3833,6 @@ export async function runSniper(venue: Venue): Promise<void> {
   if (noTable) console.log(`    ⚠️  ${noTable}`);
   const graderCaps = Object.entries(cardCaps().perCardByGrader ?? {});
   console.log(`    grades       ${GRADERS.map((g) => `${g} ${formatGradeRange(gradeRanges()[g])}`).join(", ")}`);
-  if (privateExclusions().length > 0) {
-    console.log(`    private      ${privateExclusions().length} exclusion rule(s) set outside the repository: the lots they describe are left out and counted, and the rules are not printed`);
-  }
   if (sourcingCheck()) console.log(`    sourcing     only cards a pack could award are bought (--awardable-only): $7.50 to $16,925, nothing in the jackpot hole`);
   const copyLimits = [
     ...(Number.isFinite(maxCopiesPerCard()) ? [`${maxCopiesPerCard()} copies in all`] : []),
@@ -4536,7 +4532,6 @@ export async function runSniper(venue: Venue): Promise<void> {
     const lines: FunnelLine[] = [{ kind: "total", n: lots.length, label: "live PSA/CGC Pokémon lots" }];
     const cut = (n: number, label: string) => { if (n > 0) lines.push({ kind: "cut", n, label }); };
 
-    cut(selected.counts.excluded, "excluded by a private rule");
     cut(selected.counts.offChaseList, "off the chase list");
     cut(selected.counts.noCert, "no cert number");
     cut(selected.counts.blockList, `block list${selected.counts.blockListDetail ? ` (${selected.counts.blockListDetail})` : ""}`);
