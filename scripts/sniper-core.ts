@@ -977,8 +977,11 @@ export function readSections(grader: Grader, text: string): [TierKey, GraderTier
 
   for (const section of sections) {
     const split = /^([A-Za-z][A-Za-z \-_]*?)\s*:\s*([\s\S]+)$/.exec(section);
-    const label = split ? readLabel(split[1]) : null;
-    if (split && label === null) {
+    // The grader's own name at the head of its own box — "psa: $1-100: 85%" —
+    // says nothing the box did not, and is read past.
+    const own = split !== null && split[1].trim().toLowerCase() === grader.toLowerCase();
+    const label = split && !own ? readLabel(split[1]) : null;
+    if (split && !own && label === null) {
       throw new Error(`cannot read "${split[1].trim()}" as a section — want "pristine" or "gem mint"`);
     }
     if (label !== null && grader !== "CGC") {
@@ -988,7 +991,7 @@ export function readSections(grader: Grader, text: string): [TierKey, GraderTier
     if (seen.has(key)) throw new Error(`"${key}" is given twice`);
     seen.add(key);
     if (label === null) bare = true;
-    const body = label === null ? section : split![2].trim();
+    const body = split ? split[2].trim() : section;
     if (/^(?:none|off|no|skip)$/i.test(body)) { out.push([key, TIERS_OFF]); continue; }
     out.push([key, parseTiers(body)]);
   }

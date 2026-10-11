@@ -57,6 +57,22 @@ describe("a CGC box split into Pristine and Gem Mint", () => {
     expect(() => readSections("CGC", "pristine: $1-10: 70% | pristine: $1-10: 60%")).toThrow(/given twice/);
   });
 
+  test("a box may open with its own grader's name, and reads the same without it", () => {
+    const named = table({
+      TIERS_PSA: "psa: $1-100: 85% of lowest, $100-500: 70% of lowest",
+      TIERS_CGC: "grades 10, cgc: $1-100: 70% of lowest | pristine: $1-100: 75% of lowest",
+    });
+    const plain = table({
+      TIERS_PSA: "$1-100: 85% of lowest, $100-500: 70% of lowest",
+      TIERS_CGC: "grades 10, $1-100: 70% of lowest | pristine: $1-100: 75% of lowest",
+    });
+    expect(named).toEqual(plain);
+    expect(formatTiers(named.PSA)).toBe(formatTiers(plain.PSA));
+    expect(readSections("PSA", "PSA : $1-100: 85%")).toEqual(readSections("PSA", "$1-100: 85%"));
+    // The other grader's name is still not this box's to carry.
+    expect(() => readSections("PSA", "cgc: $1-100: 85%")).toThrow(/want "pristine" or "gem mint"/);
+  });
+
   test("a label section can be switched off on its own", () => {
     const t = table({ TIERS_CGC: "$1-100: 70% of lowest | gem mint: none" });
     expect(columnOf("CGC Gem Mint", t)).toEqual(TIERS_OFF);
