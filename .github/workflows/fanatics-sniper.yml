@@ -182,7 +182,7 @@ on:
         type: string
         default: "5 sales in 60 days"
       max_copies_per_card:
-        description: 'Copies of one card to hold at once. "CGC 4" (default): every copy is bid on, but at most 4 CGC copies of a card at the same grade; PSA is uncapped. A bare number caps the card across everything too: "6, CGC 4"'
+        description: 'Copies of one card, all or none. "CGC 4" (default): a card with more than 4 CGC copies at one grade in the auction is not bid on at all, and with 4 or fewer every copy is; PSA has no limit. A bare number limits the card across everything too: "6, CGC 4"'
         type: string
         default: "CGC 4"
       fire_after_minutes:

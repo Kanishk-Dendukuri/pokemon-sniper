@@ -120,6 +120,20 @@ does nothing on a CGC table that stops at $100. The header prints both the
 tables and the bid order, so the two can be read against each other before the
 scan starts.
 
+**Copies are all or none.** The "max copies per card" box is read against the
+auction: `CGC 4`, the default, bids on every CGC copy of a card at one grade
+when the auction holds four or fewer of them, and on none when it holds more.
+The copies counted are every lot of that card the run has identified, worth a
+bid or not. PSA has no limit unless the box gives it one, and a bare number
+(`6, CGC 4`) limits the card across both graders. The run lists each card it
+left alone for this before the bids go on.
+
+**A falling card is left alone.** A lot priced off the 2nd lowest sale is
+passed over when its most recent sale is also its lowest: the lowest is then
+the news rather than a bad comp. It applies only where the 2nd lowest is the
+basis — the value basis box, or a band that names it — and any other basis is
+priced as it asked. `--allow-falling` (`ALLOW_FALLING=1`) turns it off.
+
 **A private rule can leave lots out.** Every box above is printed in the run's
 header, and the header is public for as long as the repository is. A rule in
 the `PRIVATE_EXCLUDE` secret (`.env.local` on a PC) is not: the lots it

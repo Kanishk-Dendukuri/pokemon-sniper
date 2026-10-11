@@ -145,6 +145,11 @@ import {
   bidBasis,
   selectionRule,
   quoteBand,
+  fallingCheck,
+  fallingCheckFromArgs,
+  fallingReason,
+  salesIn,
+  setFallingCheck,
   type PriceEvidence,
 } from "./sniper-core";
 import { writeXlsx, type Cell, type Sheet } from "./xlsx";
@@ -745,6 +750,11 @@ export function evaluateSold(auction: SoldAuction, lot: SoldLot, candidate: Cand
   const basis = bandBasis(key, evidence);
   if (basis.price === null) { row.status = basis.reason; return row; }
   if (row.sniper_market_price === "" || row.market_value === "") { row.status = "no priced sales"; return row; }
+  // A card the sniper leaves alone at any share — its newest sale its lowest,
+  // on a run priced off the 2nd lowest — is kept off the curve as well as out
+  // of the bids: a share cannot win a lot that is never bid on.
+  const falling = fallingReason(evidence, salesIn(price.sales, selectionRule(columnOf(key)), now));
+  if (falling) { row.status = falling; return row; }
   row.priceable = true;
   row.grid_band = gridBandLabel(row.sniper_market_price);
   row.tier_band = tierBandLabel(key, basis.price);
@@ -1358,6 +1368,7 @@ export function notesSheet(now: Date, asked: Record<VenueKey, number>, funnels: 
     ["which lots", `Sold PSA/CGC 7–10 Pokémon lots that pass the sniper's own filters: at Fanatics the chase list, at Alt every lot; the block list; a cert; and the sales rule — ${formatSalesRule()}, applied to the sales as of the run rather than as of the auction. Card Uploader answers with the five most recent only, so an older auction is judged on comps that post-date it.`],
     ["bid basis", `sniper_market_price: the ${formatBasis()} of the ${minSales()} sales with the lot's own sale left out — what the sniper, pricing hours before the close, would have worked from, and the price the table's shares multiply. The share curve is drawn on it. The basis is this run's --value-basis (VALUE_BASIS), the same box the snipers take: a table recommended here is only right for a sniper run set to the same basis. (The lowest until 2026-09-17, the second-lowest since; market_low still shows the lowest.)`],
     ["market value", `The same ${minSales()} sales, highest and lowest dropped, the other ${minSales() - 2} averaged. It is the yardstick and not the basis, so it stays the trimmed mean whatever --value-basis says. What a price paid is measured against: all_in_pct = paid all-in ÷ market value, and paid % of value (won) = what a rule's wins would have cost ÷ what they were worth, which is the resale rate that band would have to clear.`],
+    ["falling prices", "Where the basis is the 2nd lowest, a lot whose most recent sale is also its lowest is left out of the curve and of the bids, as the sniper leaves it alone: the lowest is then the news rather than a bad comp. The lot's own sale is set aside first, so a lot that simply went cheap is not read as a card falling. --allow-falling (ALLOW_FALLING=1) puts them back."],
     ["own sale", "Both houses' sales reach Card Ladder, so a lot closed recently is often one of its own card's five comps. own_sale_in_comps says so per lot. The trimmed mean drops a cheap sale as the low and a dear one as the high, so only lots that sold near their market value are pulled toward 100%."],
     ["all-in", `Hammer plus the ${Math.round(BUYERS_PREMIUM * 100)}% buyer's premium: what the winner paid. Fanatics publishes it; Alt's sold prices include it, so the hammer there is derived.`],
     ["could win", "A rule 'could win' a lot when its hammer sits under the bid the rule would have sent (Fanatics: the ladder rung at or below the max; Alt: the whole dollar). Optimistic — the hammer is where the bidding stopped, not the winner's max."],
@@ -1503,6 +1514,7 @@ export async function runSoldReport(): Promise<void> {
   // arithmetic.
   setSalesRule(salesRuleFromArgs());
   setBasis(basisFromArgs());
+  setFallingCheck(fallingCheckFromArgs());
 
   const now = new Date();
   const startedMs = Date.now();
@@ -1520,6 +1532,7 @@ export async function runSoldReport(): Promise<void> {
   console.log(`    budget       ${budgetDollars > 0 ? `$${budgetDollars} all-in per run per house — the table is cut to fit it` : "none; the table that makes the most money, whatever it costs"}`);
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
   console.log(`    value basis  the ${formatBasis()} of them — what every share on the curve multiplies`);
+  console.log(`    falling      ${fallingCheck() ? "where the basis is the 2nd lowest, a lot whose most recent sale is also its lowest is left out, as the sniper leaves it" : "off (--allow-falling)"}`);
   console.log(`    pricing      ${concurrency} cert lookups at a time, no credits\n`);
 
   // 1. The houses' closed auctions.

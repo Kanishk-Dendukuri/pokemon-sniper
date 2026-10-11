@@ -28,9 +28,10 @@
  * copy of a card the per-card cap held back is bid on once a copy under it is
  * outbid, and a bid the house turned down in the rush is quoted again.
  *
- * Every copy of a card is bid on — PSA in any number — except CGC: no more
- * than four CGC copies of one card at one grade are held at once (a CGC 10
- * Pristine and a CGC 10 Gem Mint are two grades here). See CardCaps.
+ * Every copy of a card is bid on — PSA in any number — except where the
+ * auction holds more copies than a run may hold, and then none is: by default
+ * that is more than four CGC copies of one card at one grade (a CGC 10
+ * Pristine and a CGC 10 Gem Mint are two grades here). See tooManyCopies.
  *
  * When the fire is, and why, is the house's own rule (Venue.fireAfterMinutes,
  * the "fire after" box on the workflow): minutes after extended bidding was
@@ -194,6 +195,12 @@
  *                         for a workflow input, --max-copies-cgc /
  *                         --max-copies-psa set one grader's alone. Default:
  *                         no card-wide cap, CGC 4 per grade, PSA uncapped
+ *   --allow-falling       bid on a lot even when its most recent sale is also
+ *                         its lowest. Left alone, a lot priced off the 2nd
+ *                         lowest is passed over when that is so: the lowest
+ *                         is then the news rather than a bad comp, and the
+ *                         price is falling (ALLOW_FALLING=1 for a workflow).
+ *                         Any other basis is priced as it asked
  *   --count-existing-bids charge the bids already on the account to --budget:
  *                         a $2,000 run finding $600 of open bids on the
  *                         account has $1,400 to spend, not $2,000. Those lots
@@ -1841,6 +1848,82 @@ export function bandBasis(key: TierKey, ev: PriceEvidence, table: TierTable = ti
   return { price: null, median, reason: gate.reason ?? "no priced sales" };
 }
 
+/**
+ * The sale that says a card's price is falling: its most recent one, when
+ * that is also its cheapest.
+ *
+ * The bid is worked from the second-lowest of five sales because the lowest
+ * is so often one bad comp. When the lowest is the newest of them it is not a
+ * bad comp, it is the news: the card has just sold for less than it has in
+ * weeks, and a bid priced off the sales before it is priced off a market that
+ * has moved. Null when the newest sale is not the lowest, when there are not
+ * two sales to compare, or when every sale was at one price — a card holding
+ * still, not falling. Sales dated to the same moment are taken together, and
+ * the cheapest of them is the newest.
+ */
+export function newestIsLowest(sales: Sale[]): Sale | null {
+  const priced = sales.filter((sale) => sale.price > 0 && Number.isFinite(new Date(sale.date).getTime()));
+  if (priced.length < 2) return null;
+  const lowest = Math.min(...priced.map((sale) => sale.price));
+  if (priced.every((sale) => sale.price === lowest)) return null;
+  const latest = Math.max(...priced.map((sale) => new Date(sale.date).getTime()));
+  const newest = priced
+    .filter((sale) => new Date(sale.date).getTime() === latest)
+    .reduce((a, b) => (b.price < a.price ? b : a));
+  return newest.price === lowest ? newest : null;
+}
+
+/**
+ * Whether a lot priced off the second-lowest sale is left alone when its
+ * newest sale is its lowest. Off here, so the arithmetic reads the same to
+ * anything that only wants a price; a run turns it on unless it is told not
+ * to — see fallingCheckFromArgs.
+ */
+let activeFallingCheck = false;
+
+/** Whether a falling card is passed over. */
+export function fallingCheck(): boolean {
+  return activeFallingCheck;
+}
+
+/** Pass falling cards over from now on, or stop. */
+export function setFallingCheck(on: boolean): void {
+  activeFallingCheck = on;
+}
+
+/**
+ * On unless the run says otherwise: --allow-falling, or ALLOW_FALLING=1 in
+ * the environment, bids on a card whose most recent sale is its lowest like
+ * any other. It only ever bites where the basis is the second-lowest.
+ */
+export function fallingCheckFromArgs(env: Record<string, string | undefined> = process.env): boolean {
+  if (process.argv.includes("--allow-falling")) return false;
+  return !/^(1|true|yes)$/i.test((env.ALLOW_FALLING ?? "").trim());
+}
+
+/**
+ * Why a lot is left alone for a falling price, judged on the sales it would
+ * be priced from; null when it is not falling, or when the check is off.
+ *
+ * Only a lot priced off the second-lowest sale is judged at all. That basis
+ * is the one that throws the lowest sale out as a bad comp, so it is the one
+ * that is wrong when the lowest is the newest; a run or a band that picked
+ * another basis — the lowest itself, an average, the median — has said how it
+ * wants the cheap end read, and is priced as it asked.
+ *
+ * A sale the evidence leaves out — the backtest's own-sale rule — is left out
+ * here too, or every lot that went cheap would read as a card falling.
+ */
+export function fallingReason(ev: PriceEvidence, used: Sale[], basis: BasisRule = basisRule()): string | null {
+  if (!fallingCheck()) return null;
+  if (!(basis.kind === "nth-lowest" && basis.n === 2)) return null;
+  const kept = ev.omit ? used.filter((sale) => !ev.omit!(sale)) : used;
+  const newest = newestIsLowest(kept);
+  return newest
+    ? `the most recent of its ${kept.length} sales, $${newest.price}, is also the lowest — the price is falling, so the lot is left alone`
+    : null;
+}
+
 /** What a band bid, and the price it bid on. */
 export type Quoted = { price: number; via: string; rule: string; share: number | null; allIn: number; hammer: number };
 
@@ -1886,6 +1969,8 @@ export function quoteBand(key: TierKey, price: number, ev: PriceEvidence, table:
       rule = { kind: "share", share: band.fallback.share };
       via = `alt value — ${short}`;
     } else {
+      const falling = fallingReason(ev, window, basis);
+      if (falling) return { ok: false, reason: falling };
       const found = applyBasis(basis, used);
       if (found === null) return { ok: false, reason: `no priced sales inside ${sales.windowDays}d` };
       worked = found;
@@ -3475,6 +3560,59 @@ export function cardCaps(): CardCaps {
   return { perCard: maxCopiesPerCard(), perCardByGrader: activeGraderCopyCaps };
 }
 
+/** The parts of a row a copy is counted by. */
+type Copy = Pick<Row, "card_key" | "grader" | "grade" | "grade_label">;
+
+/** How many copies of each card an auction holds, under the two keys the caps count by. */
+export type CopySupply = Map<string, number>;
+
+const cardSupplyKey = (row: Copy) => `card:${row.card_key}`;
+const gradeSupplyKey = (row: Copy) => `grade:${row.grader}:${copyGrade(row) ?? ""}:${row.card_key}`;
+
+/**
+ * Every copy of every card among these lots: counted once for the card, and
+ * once for the card at its grader and grade — a CGC 10 Pristine and a CGC 10
+ * Gem Mint apart, as the caps have them. A lot that never identified has no
+ * card to be a copy of, and is not counted.
+ */
+export function copySupply(rows: Copy[]): CopySupply {
+  const supply: CopySupply = new Map();
+  for (const row of rows) {
+    if (!row.card_key) continue;
+    for (const key of [cardSupplyKey(row), gradeSupplyKey(row)]) supply.set(key, (supply.get(key) ?? 0) + 1);
+  }
+  return supply;
+}
+
+/**
+ * All or none: why a lot is left alone because the auction holds more copies
+ * of its card than a run may hold, or null.
+ *
+ * A cap used to mean "bid on this many and keep the rest back": four CGC 9s
+ * of a card bid on, the fifth and sixth waiting for one of the four to be
+ * outbid. Since 2026-10-11 it is read against the auction rather than against
+ * the book. At or under the cap every copy is bid on; over it, none is — a
+ * card with six copies in one auction is a card the room has six chances at,
+ * and four of them bought is a heap of a slab nobody was short of.
+ *
+ * The copies counted are every lot of the card the run has identified, worth
+ * a bid or not: a copy the room has already taken past the max is a copy in
+ * the auction all the same.
+ */
+export function tooManyCopies(row: Copy, supply: CopySupply, caps: CardCaps = cardCaps()): string | null {
+  if (!row.card_key) return null;
+  const all = supply.get(cardSupplyKey(row)) ?? 0;
+  if (all > caps.perCard) {
+    return `${all} copies of this card in the auction, more than the ${caps.perCard} a run may hold — all or none`;
+  }
+  const cap = caps.perCardByGrader?.[row.grader];
+  const graded = supply.get(gradeSupplyKey(row)) ?? 0;
+  if (cap !== undefined && graded > cap) {
+    return `${graded} ${[row.grader, copyGrade(row)].filter(Boolean).join(" ")} copies of this card in the auction, more than the ${cap} a run may hold — all or none`;
+  }
+  return null;
+}
+
 /**
  * What became of a bid, in the words a person would use.
  *
@@ -3652,6 +3790,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   const batchPricingLimit = batchPricingFromArgs();
   setSourcingCheck(sourcingCheckFromArgs());
   setPrivateExclusions(privateExclusionsFromEnv());
+  setFallingCheck(fallingCheckFromArgs());
   setSalesRule(salesRuleFromArgs());
   setBasis(basisFromArgs());
   const fireAfterMin = fireAfterFromArgs(venue.fireAfterMinutes);
@@ -3699,8 +3838,13 @@ export async function runSniper(venue: Venue): Promise<void> {
     console.log(`    private      ${privateExclusions().length} exclusion rule(s) set outside the repository: the lots they describe are left out and counted, and the rules are not printed`);
   }
   if (sourcingCheck()) console.log(`    sourcing     only cards a pack could award are bought (--awardable-only): $7.50 to $16,925, nothing in the jackpot hole`);
-  console.log(`    per card     ${Number.isFinite(maxCopiesPerCard()) ? `at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` : "every copy of a card"}` +
-    (graderCaps.length > 0 ? `, ${Number.isFinite(maxCopiesPerCard()) ? "and " : "except "}at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} copies of it per grade` : ""));
+  const copyLimits = [
+    ...(Number.isFinite(maxCopiesPerCard()) ? [`${maxCopiesPerCard()} copies in all`] : []),
+    ...graderCaps.map(([g, n]) => `${n} ${g} copies at one grade`),
+  ];
+  console.log(`    per card     ${copyLimits.length === 0
+    ? "every copy of a card"
+    : `all or none: every copy of a card is bid on, unless the auction holds more than ${copyLimits.join(" or ")} — then none of them is`}`);
   console.log(`    sales rule   ${minSales()} sales, every one inside the last ${salesWindowDays()} days`);
   console.log(`    batch price  ${batchOnly
     ? `every candidate uploaded as a Card Uploader batch, its last five sales read off the batch's window${Number.isFinite(batchPricingLimit) ? ` — up to ${batchPricingLimit} cert(s), ~${batchPricingLimit * 2} credits at most` : " — 2 credits a cert, no cap"}`
@@ -3708,6 +3852,9 @@ export async function runSniper(venue: Venue): Promise<void> {
       ? `up to ${Number.isFinite(batchPricingLimit) ? batchPricingLimit : "every"} cert(s) the free lookup will not answer are priced by batch upload, 2 credits each`
       : "off — a cert the free lookup will not answer goes unpriced (--batch-pricing=N to buy up to N)"}`);
   console.log(`    value basis  the ${formatBasis()} of them — what the tier tables' percentages multiply`);
+  console.log(`    falling      ${fallingCheck()
+    ? "where the basis is the 2nd lowest, a lot whose most recent sale is also its lowest is left alone"
+    : "off (--allow-falling): a lot is bid on even when its most recent sale is its lowest"}`);
   if (live) console.log(`    poll         every ${pollS}s once the bids are on, ${Math.max(MIN_POLL_S, Math.round(pollS / POLL_EXTENDED_DIVISOR))}s in extended bidding`);
   if (wantEmail) console.log(`    account      ${wantEmail}`);
   console.log();
@@ -3951,16 +4098,19 @@ export async function runSniper(venue: Venue): Promise<void> {
 
       // The pool is rebuilt in priority order every round: a later batch can
       // hold a better lot than an earlier one, and the fire should meet the
-      // best of what is known rather than the first thing found. A plan bids
-      // (on paper) as it goes; a live run holds everything for the fire, and
-      // only a round priced after it hands its lots to the watch below.
+      // best of what is known rather than the first thing found. A live run
+      // holds everything for the fire, and only a round priced after it hands
+      // its lots to the watch below. A plan holds too, and bids (on paper)
+      // once the list is priced: whether a card is bid on at all turns on how
+      // many copies of it the auction holds, and that is not known until the
+      // last round is in.
       bidding.sort(byBidOrder);
-      if (!live || fired) {
+      if (live && fired) {
         const filled = await book.fill(pool());
         if (filled.auctionClosed) auctionClosed = true;
         console.log(`    ${book.standing()}`);
       } else {
-        console.log(`    ${pool().length} lot(s) priced and held for the fire`);
+        console.log(`    ${pool().length} lot(s) priced and held ${live ? "for the fire" : "until the list is priced"}`);
       }
 
       // Where the pricing stands, and when it will be done at this pace: the
@@ -3975,8 +4125,50 @@ export async function runSniper(venue: Venue): Promise<void> {
       console.log();
     };
 
-    /** What the book may act on: every priced lot a re-scan has not already found past the max. */
-    const pool = () => bidding.filter((row) => !pricedOutBy.has(row.listing_id)).map((row) => toBiddable(row)!);
+    /**
+     * How many copies of each card the auction holds, counted over every lot
+     * the run has identified so far, worth a bid or not. Both lists only ever
+     * grow, so the count is taken again only when one of them has.
+     */
+    let counted = -1;
+    let supply: CopySupply = new Map();
+    const copies = (): CopySupply => {
+      if (counted !== worthy.length + rejected.length) {
+        supply = copySupply([...worthy, ...rejected]);
+        counted = worthy.length + rejected.length;
+      }
+      return supply;
+    };
+
+    /**
+     * What the book may act on: every priced lot a re-scan has not already
+     * found past the max, of a card the auction does not hold too many copies
+     * of — all or none, see tooManyCopies.
+     */
+    const pool = () => bidding
+      .filter((row) => !pricedOutBy.has(row.listing_id) && !tooManyCopies(row, copies()))
+      .map((row) => toBiddable(row)!);
+
+    /**
+     * The cards the all-or-none rule leaves alone, a line each: how many
+     * copies the auction holds against what a run may hold, and how many of
+     * them had been worth a bid.
+     */
+    const sayLeftAlone = () => {
+      const cards = new Map<string, { why: string; title: string; lots: number }>();
+      for (const row of bidding) {
+        const why = tooManyCopies(row, copies());
+        if (!why) continue;
+        const card = cards.get(`${why}|${row.card_key}`) ?? { why, title: row.title, lots: 0 };
+        card.lots++;
+        cards.set(`${why}|${row.card_key}`, card);
+      }
+      if (cards.size === 0) return;
+      const lots = [...cards.values()].reduce((sum, card) => sum + card.lots, 0);
+      console.log(`    all or none: ${lots} lot(s) worth a bid left alone, of ${cards.size} card(s) the auction holds too many copies of`);
+      for (const card of cards.values()) console.log(`    –  ${card.why} — ${card.lots} of them worth a bid — ${card.title}`);
+      log("all-or-none", { lots, cards: cards.size });
+    };
 
     /**
      * The next slice of the list. One size, near the close or far from it:
@@ -4068,6 +4260,15 @@ export async function runSniper(venue: Venue): Promise<void> {
       console.log(`    ${candidates.length - cursor} candidate(s) left unpriced\n`);
     }
 
+    // A plan's bids, on paper, now that the list is priced: the same pool, in
+    // the same order, the fire would have met.
+    if (!live && !auctionClosed) {
+      sayLeftAlone();
+      const filled = await book.fill(pool());
+      if (filled.auctionClosed) auctionClosed = true;
+      console.log(`    ${book.standing()}\n`);
+    }
+
     /**
      * The rows the CSV is made of, with what became of each, and the two
      * files: the bid list and the summary page. Written at the start of the
@@ -4081,7 +4282,7 @@ export async function runSniper(venue: Venue): Promise<void> {
      * had found past the max, for the funnel.
      */
     const listedInLog = new Set<string>();
-    const writeOutputs = (final: boolean): number => {
+    const writeOutputs = (final: boolean): { pricedOut: number; tooMany: number } => {
       worthy.sort(byBidOrder);
       const placedBy = new Map(book.placed.map((b) => [b.listingId, b]));
       const inheritedBy = new Map(book.inherited.map((b) => [b.listingId, b]));
@@ -4091,6 +4292,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       const held = !final && live && !fired;
       let queue = 0;
       let pricedOutCount = 0;
+      let tooManyCount = 0;
       for (const row of worthy) {
         const id = row.listing_id;
         row.bid_rank = "";
@@ -4116,6 +4318,8 @@ export async function runSniper(venue: Venue): Promise<void> {
         if (skipped) { row.bid_status = `not bid: ${skipped.reason}`; continue; }
         const out = pricedOutBy.get(id);
         if (out) { row.bid_status = `not bid: ${out}`; pricedOutCount++; continue; }
+        const many = tooManyCopies(row, copies());
+        if (many) { row.bid_status = `not bid: ${many}`; tooManyCount++; continue; }
         if (!toBiddable(row)) { row.bid_status = "not bid: see flags"; continue; }
         row.bid_rank = ++queue;
         row.bid_status = held ? "held for the fire" : "next in line";
@@ -4134,7 +4338,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       writeFileSync(join(outDir, "summary.md"), summaryMarkdown(worthy, rejected, onChaseList, lots.length,
         { venue: venue.name, csv: csvName, mode: held ? `${mode} — holding for the fire` : mode, standing: book.standing(), chaseList: chasing.length > 0, held }));
       if (!final) log("written", { held: queue, out: pricedOutCount });
-      return pricedOutCount;
+      return { pricedOut: pricedOutCount, tooMany: tooManyCount };
     };
 
     /**
@@ -4145,6 +4349,7 @@ export async function runSniper(venue: Venue): Promise<void> {
      * lots, and a sample is no check.
      */
     const sayPlan = () => {
+      sayLeftAlone();
       const plan = book.plan(pool());
       console.log(`    held for the fire: ${plan.picks.length} lot(s), ${dollars(plan.exposureCents)} all-in if every one won, under a ${dollars(budgetCents)} ceiling${plan.beyond > 0 ? `; ${plan.beyond} more beyond it` : ""}`);
       for (const row of plan.picks) {
@@ -4177,7 +4382,7 @@ export async function runSniper(venue: Venue): Promise<void> {
       let out = 0;
       let unseen = 0;
       for (const row of bidding) {
-        if (pricedOutBy.has(row.listing_id) || book.settled.has(row.listing_id)) continue;
+        if (pricedOutBy.has(row.listing_id) || book.settled.has(row.listing_id) || tooManyCopies(row, copies())) continue;
         const biddable = toBiddable(row);
         if (!biddable) continue;
         const lot = byId.get(row.listing_id);
@@ -4320,7 +4525,7 @@ export async function runSniper(venue: Venue): Promise<void> {
 
     // 7. What happened, written onto the rows the CSV is made of — for the
     //    last time; the hold wrote the same file at every look.
-    const pricedOutCount = writeOutputs(true);
+    const { pricedOut: pricedOutCount, tooMany: tooManyCount } = writeOutputs(true);
     log("end", { standing: book.standing(), priced: cursor, worthy: worthy.length });
 
     // The run in one column. The CSV holds the detail; this says where the lots
@@ -4355,8 +4560,9 @@ export async function runSniper(venue: Venue): Promise<void> {
     cut(notBiddable, "unidentified, so not bid on");
     cut(book.inherited.length, "already carrying a bid of this account's, left alone");
     cut(pricedOutCount, "passed the max before the bids went on");
+    cut(tooManyCount, "more copies in the auction than a run may hold — all or none");
     cut(book.skipped.length, `passed over at ${venue.name} — closed, or past the max`);
-    cut(worthy.length - notBiddable - book.inherited.length - book.skipped.length - pricedOutCount - book.placed.length,
+    cut(worthy.length - notBiddable - book.inherited.length - book.skipped.length - pricedOutCount - tooManyCount - book.placed.length,
       "left waiting — beyond the ceiling");
     lines.push({ kind: "rule" }, { kind: "total", n: book.placed.length, label: live ? "bid on" : "would be bid on" });
 
