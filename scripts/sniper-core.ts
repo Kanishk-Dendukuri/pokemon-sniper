@@ -2060,6 +2060,89 @@ export type Candidate = ScannedLot & {
   keywords: string[];
 };
 
+/**
+ * A rule for lots that are not to be bid on, kept out of the repository.
+ *
+ * Everything else a run bids by is typed into a workflow box and printed in
+ * its header, and both are there for anyone to read for as long as the
+ * repository is public. A private exclusion is the one thing that is neither.
+ * It comes from the PRIVATE_EXCLUDE environment variable — a repository
+ * secret in Actions, .env.local on a PC — and a run says that it has one and
+ * how many lots it left out, and never what it is.
+ *
+ * Written as rules separated by commas, each of them any of a language, a
+ * grader and a grade or a range of grades, in any order: "English CGC 8-9",
+ * "CGC 9.5 Japanese", "PSA 1-3". What a rule does not name matches anything,
+ * so "CGC 7" is every CGC 7 and "English" is every English lot.
+ */
+export type PrivateExclusion = { language?: "English" | "Japanese"; grader?: Grader; grades?: GradeRange };
+
+/**
+ * The rules, from the words for them. What cannot be read is an error that
+ * names the rule by its place in the list and never by its words: the error
+ * is printed where anyone can read it, and the rule is not theirs to read.
+ */
+export function parsePrivateExclusions(text: string): PrivateExclusion[] {
+  const pieces = text.split(/[,;|\n]/).map((piece) => piece.trim()).filter(Boolean);
+  return pieces.map((piece, i) => {
+    const bad = (why: string) => new Error(`rule ${i + 1} of ${pieces.length} ${why}`);
+    const rule: PrivateExclusion = {};
+    for (const word of piece.split(/\s+/)) {
+      const language = /^japanese$/i.test(word) ? "Japanese" : /^english$/i.test(word) ? "English" : null;
+      const grader = GRADERS.find((g) => g.toLowerCase() === word.toLowerCase());
+      if (language) {
+        if (rule.language) throw bad("names a language twice");
+        rule.language = language;
+      } else if (grader) {
+        if (rule.grader) throw bad("names a grader twice");
+        rule.grader = grader;
+      } else {
+        if (rule.grades) throw bad("names a grade twice, or has a word that is not a language, a grader or a grade");
+        try {
+          rule.grades = parseGradeRange(word);
+        } catch {
+          throw bad("has a word that is not a language, a grader or a grade");
+        }
+      }
+    }
+    return rule;
+  });
+}
+
+/** The rules a run was given: PRIVATE_EXCLUDE, and none when it is blank. There is no flag — a command line is printed. */
+export function privateExclusionsFromEnv(env: Record<string, string | undefined> = process.env): PrivateExclusion[] {
+  const text = (env.PRIVATE_EXCLUDE ?? "").trim();
+  if (!text) return [];
+  try {
+    return parsePrivateExclusions(text);
+  } catch (err) {
+    throw new Error(`the private exclusion list (PRIVATE_EXCLUDE) could not be read: ${err instanceof Error ? err.message : "it is not written as rules"}`);
+  }
+}
+
+let activeExclusions: PrivateExclusion[] = [];
+
+/** The private exclusions this run leaves lots out by. */
+export function privateExclusions(): PrivateExclusion[] {
+  return activeExclusions;
+}
+
+/** Leave out what these rules describe from now on — what PRIVATE_EXCLUDE does. */
+export function setPrivateExclusions(rules: PrivateExclusion[]): void {
+  activeExclusions = rules;
+}
+
+/** Whether a private exclusion leaves this lot out. */
+export function privatelyExcluded(
+  lot: Pick<ScannedLot, "language" | "grader" | "grade">,
+  rules: PrivateExclusion[] = privateExclusions(),
+): boolean {
+  return rules.some((rule) =>
+    (rule.language === undefined || lot.language === rule.language) &&
+    (rule.grader === undefined || lot.grader === rule.grader) &&
+    (rule.grades === undefined || (lot.grade !== undefined && lot.grade >= rule.grades.min && lot.grade <= rule.grades.max)));
+}
+
 /** A block-list regex as the words it matches: `\bplaying[\s-]?cards?\b` → "playing cards". */
 export function prettyPattern(source: string): string {
   return source
@@ -2083,6 +2166,8 @@ export type SelectionCounts = {
   /** Slabs outside the run's grade range for their grader. */
   offGrade: number;
   masterBallOrDuplicate: number;
+  /** Lots a private exclusion left out — counted, and never listed. */
+  excluded: number;
 };
 
 /**
@@ -2116,7 +2201,7 @@ export function selectCandidates(
   const chasing = chasedGraders(asked);
   const chases = (grader: Grader) => chasing.includes(grader);
   const chaseList = chasing.length > 0;
-  const dropped = { noCert: 0, noMatch: 0, ungraded: 0, noNumber: 0, offGrade: 0 };
+  const dropped = { noCert: 0, noMatch: 0, ungraded: 0, noNumber: 0, offGrade: 0, excluded: 0 };
   const blocked = new Map<string, number>();
   const seen = new Set<string>();
   const candidates: Candidate[] = [];
@@ -2136,6 +2221,8 @@ export function selectCandidates(
   for (const lot of ordered) {
     const grader = lot.grader as Grader;
     if (!GRADERS.includes(grader)) continue;
+    // Counted and not listed: a list of them would be the rule, read backwards.
+    if (privatelyExcluded(lot)) { dropped.excluded++; continue; }
 
     let keywords = matchKeywords(lot.title);
     if (chases(grader) && keywords.length === 0) { dropped.noMatch++; continue; }
@@ -2190,6 +2277,7 @@ export function selectCandidates(
   log(chaseList
     ? `    dropped: ${dropped.noMatch} off the chase list (${chasing.join(" and ")} only), ${dropped.noCert} without a cert`
     : `    dropped: ${dropped.noCert} without a cert (no chase list here: every PSA/CGC lot is a candidate)`);
+  if (dropped.excluded > 0) log(`    excluded: ${dropped.excluded} by a private rule — set outside the repository, and not listed here`);
   log(`    rejected: ${blockedTotal} on the block list` +
     (blockedTotal > 0 ? ` (${byCount.map(([p, n]) => `${n} ${p}`).join(", ")})` : "") +
     `, ${dropped.ungraded} CGC slabs with no number grade, ${dropped.noNumber} with no card number, ${dropped.offGrade} outside the grade range` +
@@ -2209,6 +2297,7 @@ export function selectCandidates(
       ungraded: dropped.ungraded,
       noNumber: dropped.noNumber,
       offGrade: dropped.offGrade,
+      excluded: dropped.excluded,
       masterBallOrDuplicate: rejected.length - blockedTotal - dropped.ungraded - dropped.noNumber - dropped.offGrade,
     },
   };
@@ -3562,6 +3651,7 @@ export async function runSniper(venue: Venue): Promise<void> {
   const batchOnly = batchOnlyFromArgs();
   const batchPricingLimit = batchPricingFromArgs();
   setSourcingCheck(sourcingCheckFromArgs());
+  setPrivateExclusions(privateExclusionsFromEnv());
   setSalesRule(salesRuleFromArgs());
   setBasis(basisFromArgs());
   const fireAfterMin = fireAfterFromArgs(venue.fireAfterMinutes);
@@ -3605,6 +3695,9 @@ export async function runSniper(venue: Venue): Promise<void> {
   if (noTable) console.log(`    ⚠️  ${noTable}`);
   const graderCaps = Object.entries(cardCaps().perCardByGrader ?? {});
   console.log(`    grades       ${GRADERS.map((g) => `${g} ${formatGradeRange(gradeRanges()[g])}`).join(", ")}`);
+  if (privateExclusions().length > 0) {
+    console.log(`    private      ${privateExclusions().length} exclusion rule(s) set outside the repository: the lots they describe are left out and counted, and the rules are not printed`);
+  }
   if (sourcingCheck()) console.log(`    sourcing     only cards a pack could award are bought (--awardable-only): $7.50 to $16,925, nothing in the jackpot hole`);
   console.log(`    per card     ${Number.isFinite(maxCopiesPerCard()) ? `at most ${maxCopiesPerCard()} lot(s) of one card winning or won, whatever the grade or grader` : "every copy of a card"}` +
     (graderCaps.length > 0 ? `, ${Number.isFinite(maxCopiesPerCard()) ? "and " : "except "}at most ${graderCaps.map(([g, n]) => `${n} ${g}`).join(", ")} copies of it per grade` : ""));
@@ -4238,6 +4331,7 @@ export async function runSniper(venue: Venue): Promise<void> {
     const lines: FunnelLine[] = [{ kind: "total", n: lots.length, label: "live PSA/CGC Pokémon lots" }];
     const cut = (n: number, label: string) => { if (n > 0) lines.push({ kind: "cut", n, label }); };
 
+    cut(selected.counts.excluded, "excluded by a private rule");
     cut(selected.counts.offChaseList, "off the chase list");
     cut(selected.counts.noCert, "no cert number");
     cut(selected.counts.blockList, `block list${selected.counts.blockListDetail ? ` (${selected.counts.blockListDetail})` : ""}`);

@@ -287,6 +287,11 @@ jobs:
           # When the bids go on, in minutes after extended bidding opens.
           # Blank means the venue's own default.
           FIRE_AFTER_MINUTES: ${{ inputs.fire_after_minutes }}
+          # Lots this run is not to bid on, by a rule kept out of the repository
+          # and out of this form: the log says that one is set and how many
+          # lots it left out, and never what it is. No secret means no rule.
+          # See PrivateExclusion in scripts/sniper-core.ts for how one is written.
+          PRIVATE_EXCLUDE: ${{ secrets.PRIVATE_EXCLUDE }}
 
       - name: Publish summary
         if: always()

@@ -120,6 +120,15 @@ does nothing on a CGC table that stops at $100. The header prints both the
 tables and the bid order, so the two can be read against each other before the
 scan starts.
 
+**A private rule can leave lots out.** Every box above is printed in the run's
+header, and the header is public for as long as the repository is. A rule in
+the `PRIVATE_EXCLUDE` secret (`.env.local` on a PC) is not: the lots it
+describes are never candidates, and the run says only that a private rule is
+set and how many lots it left out — in the header, at the selection and in the
+funnel. Rules are separated by commas, each any of a language, a grader and a
+grade or grade range: `English CGC 8-9, PSA 1-3`. It applies to the Fanatics
+and Alt snipers; there is no flag for it, since a command line is printed.
+
 `--budget` is a ceiling on what the run may hold at once, all-in — $10,000
 unless told — and not a target: how many lots are won is the tier table's
 and the per-card cap's doing.
@@ -349,6 +358,7 @@ Secrets the repository needs:
 | `FANATICS_REFRESH_TOKEN` | a live Fanatics run; `npm run sniper -- --export-session` mints one |
 | `ALT_SESSION_TOKEN` | a live Alt run; `npm run sniper:alt -- --login` then `--export-session` |
 | `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET` | the eBay scan; a developer.ebay.com **production** keyset, not the sandbox one |
+| `PRIVATE_EXCLUDE` | optional — lots a Fanatics or Alt run leaves out by a rule that is counted in the log and never printed |
 | `EBAY_SESSION_STATE` | a live eBay run from Actions; `npm run sniper:ebay -- --export-session` prints it. The dispatch box wins over it |
 
 A live run holds its bids open through extended bidding, so the job is given
